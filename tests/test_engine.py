@@ -137,3 +137,20 @@ def test_live_mode_async_veto_path(market, tmp_path, any_count):
     assert len(att) > 0
     assert not eng.pending_veto                      # every veto came back
     assert att["action"].isin(["taken"]).any() or att["action"].str.startswith(("skip", "missed")).any()
+
+
+def test_snapshot_and_journal_for_dashboard(market, tmp_path, any_count):
+    import json as _json
+
+    c = cfg(gates={"min_true_count": -99.0, "market_against": -99.0}, hazards={"cost_mult": 0.0})
+    plan, tr, qu = market
+    notes = []
+    rec = Recorder(tmp_path, "snap", "v")
+    eng = Engine(c, plan, SimBroker(c.simulator), None, rec, feed="sip", journal=notes.append)
+    replay(eng, tr, qu)
+    snap = eng.snapshot({"account": "paper"})
+    text = _json.dumps(snap, default=str)                 # must be JSON-able
+    assert '"symbols"' in text and snap["budget"]["capital"] == 10000
+    assert len(snap["symbols"]) == len(plan.watchlist)
+    kinds = {n["kind"] for n in notes}
+    assert {"setup", "taken", "exit"} <= kinds

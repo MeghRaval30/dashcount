@@ -32,6 +32,18 @@ def veto_score_path() -> Path:
     return state_dir() / "veto_score.json"
 
 
+def snapshot_path() -> Path:
+    return state_dir() / "live_snapshot.json"
+
+
+def stop_path() -> Path:
+    return state_dir() / "stop.flag"
+
+
+def journal_path(day: str) -> Path:
+    return state_dir() / f"journal-{day}.jsonl"
+
+
 def capital_path() -> Path:
     return state_dir() / "capital.json"
 

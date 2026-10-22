@@ -22,10 +22,15 @@ dependencies = [
     "safetensors>=0.4",
     "tqdm>=4.66",
     "lxml>=5",
+    "pyside6>=6.7",
 ]
 
 [dependency-groups]
-dev = ["pytest>=8", "pytest-timeout>=2.3"]
+dev = [
+    "pyinstaller>=6.10",
+    "pytest>=8",
+    "pytest-timeout>=2.3",
+]
 
 [project.scripts]
 dashcount = "dashcount.cli:main"

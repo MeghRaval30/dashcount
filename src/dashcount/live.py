@@ -28,7 +28,8 @@ from .levelmap import LevelMap
 from .models import Quote, Trade
 from .recorder import Recorder
 from .scoreboard import console, write_report
-from .state import Capital, beat, bot_positions_path, capital_path, guardian_path, read_json, veto_score_path, write_json
+from .state import (Capital, beat, bot_positions_path, capital_path, guardian_path, journal_path, read_json,
+                    snapshot_path, stop_path, veto_score_path, write_json)
 from .timeutil import ET, calendar, et_ts, fmt_et
 
 log = logging.getLogger(__name__)
@@ -130,9 +131,14 @@ def run_live(cfg: Config, real_money: bool = False, vetoes: str = "full", day: d
     gpath = guardian_path()
     day_s = today.isoformat()
     capital = Capital(cfg.account.capital, capital_path())
+    jpath = journal_path(day_s)
+
+    def journal(ev: dict) -> None:
+        with jpath.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(ev, default=str) + "\n")
     engine = Engine(cfg, plan, broker, chain, rec, feed="iex", live=True,
                     guardian_block=lambda: GuardianState.load(gpath).entry_block(day_s),
-                    memory=memory, veto_score=score, alert=notify.send, capital=capital)
+                    memory=memory, veto_score=score, alert=notify.send, capital=capital, journal=journal)
     log.info("trading budget: %s (budget equity now %s)",
              f"${cfg.account.capital:,.0f}" if cfg.account.capital else "whole account", f"{engine.account().equity:,.2f}")
     broker.post = engine.inbox.put
@@ -150,7 +156,10 @@ def run_live(cfg: Config, real_money: bool = False, vetoes: str = "full", day: d
     feed.start()
     notify.send(f"Live on {len(plan.symbols)} symbols: {', '.join(s for s in plan.symbols if s not in cfg.universe.market_symbols)}")
 
-    last_beat = last_flush = last_status = 0.0
+    last_beat = last_flush = last_status = last_snap = 0.0
+    stop_path().unlink(missing_ok=True)
+    journal({"ts": time.time(), "kind": "status", "symbol": "",
+             "text": f"live on {len(plan.symbols)} symbols, budget ${cfg.account.capital or 0:,.0f}"})
     end_at = session.close + 120
     errors = 0
     n_events = {"trade": 0, "quote": 0}
@@ -192,6 +201,22 @@ def run_live(cfg: Config, real_money: bool = False, vetoes: str = "full", day: d
                 syms = [t.symbol for t in engine.executor.active()]
                 safely(beat, {"status": "trading", "positions": syms})
                 safely(write_json, bot_positions_path(), {"ts": now, "symbols": syms})
+            if now - last_snap >= 2:
+                last_snap = now
+                safely(lambda: write_json(snapshot_path(), engine.snapshot(
+                    {"account": acct_kind, "events": dict(n_events), "watchlist_ranking": plan.ranking[:20],
+                     "removed_earnings": plan.removed_earnings})))
+            if stop_path().exists():
+                log.warning("stop requested from the dashboard: flattening and ending the day")
+                journal({"ts": now, "kind": "status", "symbol": "", "text": "STOP pressed: closing everything"})
+                engine.executor.flatten_all("stopped by user")
+                t_end = time.time() + 30
+                while engine.executor.active() and time.time() < t_end:
+                    time.sleep(0.5)
+                    safely(engine.drain_inbox)
+                    safely(engine.advance_to, time.time())
+                stop_path().unlink(missing_ok=True)
+                break
             if now - last_status >= 300:
                 last_status = now
                 acct = engine.account()
@@ -213,6 +238,10 @@ def run_live(cfg: Config, real_money: bool = False, vetoes: str = "full", day: d
         engine.drain_inbox()
         row = engine.finish()
         rec.flush(day_s)
+        try:
+            write_json(snapshot_path(), engine.snapshot({"account": acct_kind, "events": dict(n_events), "finished": True}))
+        except Exception:
+            log.exception("final snapshot failed")
         write_json(veto_score_path(), score.d)
         beat({"status": "done"})
         keep_awake(False)

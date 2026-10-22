@@ -86,6 +86,7 @@ class Engine:
         veto_score: VetoScore | None = None,
         alert: Callable[[str], None] = lambda m: None,
         capital=None,
+        journal: Callable[[dict], None] | None = None,
     ) -> None:
         self.cfg = cfg
         self.plan = plan
@@ -102,6 +103,7 @@ class Engine:
         self.veto_score = veto_score or VetoScore()
         self.alert = alert
         self.capital = capital           # state.Capital (live budget) or None
+        self.journal = journal           # live: structured events for the dashboard
         self.inbox: queue.Queue = queue.Queue()
         # live: veto calls run one at a time off the event thread
         self._outer = cf.ThreadPoolExecutor(max_workers=1, thread_name_prefix="decide") if live else None
@@ -210,7 +212,10 @@ class Engine:
         if self.executor.busy(t.symbol):
             tid = self.executor.by_symbol[t.symbol]
             tr = self.executor.trades[tid]
+            had_cp = bool(tr.track and tr.track.checkpoint_done)
             self.executor.on_price(t.symbol, t.price, self.now, self.tc_dir(t.symbol, tr.direction))
+            if not had_cp and tr.track is not None and tr.track.checkpoint_done:
+                self._note("checkpoint", t.symbol, "+1R reached: stop moved to entry (checkpoint)")
         for g in list(self.ghosts.get(t.symbol, [])):
             self._update_ghost(g, t.price)
 
@@ -253,6 +258,7 @@ class Engine:
 
     def _guardian_action(self, kind: str, reason: str) -> None:
         self.rec.add("guardian_events", {"ts": self.now, "kind": kind, "reason": reason})
+        self._note("guardian", "", f"{kind}: {reason}")
         if kind == "flatten":
             self.executor.flatten_all(f"guardian:{reason}")
         elif kind == "alert":
@@ -391,6 +397,9 @@ class Engine:
         if self.executor.busy(c.symbol) or block:
             return self._skip(c, base, "skip_late:" + (block or "busy"), f)
         self.counts["taken"] += 1
+        self._note("taken", c.symbol, f"{c.pad.replace('_', ' ')} {side_name(c.direction).lower()} -> TAKEN "
+                   f"{qty} sh, bet {base.get('risk_pct')}%, stop {c.stop:.2f} target {c.target:.2f}",
+                   tc=round(f.get("tc") or 0.0, 2), action="taken")
         log.info("TAKEN %s %s %s qty %d entry %.2f stop %.2f target %.2f (true count %+.2f, bet %s%%)",
                  c.symbol, c.pad, side_name(c.direction), qty, c.entry, c.stop, c.target, f.get("tc") or 0.0,
                  base.get("risk_pct"))
@@ -399,7 +408,24 @@ class Engine:
         self.attempt_features[c.attempt_id] = f
         self.executor.enter(c, qty, self.now, meta={"attempt": base})
 
+    def _note(self, kind: str, symbol: str, text: str, **extra) -> None:
+        if self.journal is not None:
+            try:
+                self.journal({"ts": self.now, "kind": kind, "symbol": symbol, "text": text, **extra})
+            except Exception:
+                log.exception("journal write failed")
+
     def _skip(self, c: Candidate, base: dict, action: str, f: dict, vetoed_by: str = "") -> None:
+        k = base.get("kronos_odds")
+        fr = base.get("finr1_reason")
+        why = action.replace("skip_", "").replace("_", " ")
+        if action.startswith("vetoed:kronos") and k is not None:
+            why = f"vetoed by Kronos ({k * 100:.0f}% odds)"
+        elif action.startswith("vetoed:finr1"):
+            why = f"vetoed by Fin-R1 ({(fr or 'other').replace('_', ' ')})"
+        self._note("veto" if action.startswith("vetoed") else "setup", c.symbol,
+                   f"{c.pad.replace('_', ' ')} {side_name(c.direction).lower()} -> {why}",
+                   tc=round(f.get("tc") or 0.0, 2), action=action)
         if self.live:
             log.info("setup %s %s %s -> %s (true count %+.2f)", c.symbol, c.pad, side_name(c.direction),
                      action, f.get("tc") or 0.0)
@@ -471,6 +497,8 @@ class Engine:
             "r": r, "mfe_r": row["mfe_r"], "mae_r": row["mae_r"], "hold_s": t.closed_ts - t.filled_ts,
             "exit_price": t.exit_avg, "resolved_ts": self.now, "pnl": pnl, "pnl_realistic": realistic,
         })
+        self._note("exit", t.symbol, f"{side_name(t.direction).lower()} closed: {t.exit_reason.replace('_', ' ')} "
+                   f"{pnl:+.2f} ({r:+.2f}R)", pnl=round(pnl, 2), r=round(r, 2), action=t.exit_reason)
         self.today_r += r
         if pnl < 0:
             self.losers_today += 1
@@ -524,6 +552,64 @@ class Engine:
             "memory": [{"text": describe(m), "r": m.outcome_r} for m in mem],
         }
         return b
+
+    # ---------------------------------------------------------- snapshot
+    def snapshot(self, extra: dict | None = None) -> dict:
+        """Everything the dashboard shows, as plain JSON-able data."""
+        now = self.now
+        mz = self.market_z()
+        acct = self.account()
+
+        def chg(st):
+            p = st.last_price
+            return (p / st.item.prev_close - 1) * 100 if (p and st.item.prev_close) else None
+
+        syms = []
+        for sym, st in self.states.items():
+            z = st.z(now)
+            sp, nsp = st.spread.spread, st.spread.normal()
+            syms.append({
+                "symbol": sym, "sector": st.item.sector, "market": st.item.is_market,
+                "price": st.last_price, "change_pct": chg(st), "z": round(z, 3),
+                "tc_long": round(sizing.true_count(z, mz, 1, self.cfg.gates), 3),
+                "tc_short": round(sizing.true_count(z, mz, -1, self.cfg.gates), 3),
+                "vwap": st.bars.vwap, "spread_ratio": (sp / nsp) if (sp and nsp) else None,
+                "last_trade_age": (now - st.last_trade_ts) if st.last_trade_ts else None,
+                "busy": self.executor.busy(sym), "score": st.item.score, "gap_pct": st.item.gap_pct,
+            })
+        trades = []
+        for t in self.executor.active():
+            st = self.states.get(t.symbol)
+            price = st.last_price if st else None
+            tr = t.track
+            trades.append({
+                "symbol": t.symbol, "direction": t.direction, "pad": t.pad, "state": t.state,
+                "qty": t.qty_filled or t.qty_req, "entry": t.avg_entry or t.planned_entry,
+                "stop": tr.stop if tr else t.planned_stop, "target": t.target, "price": price,
+                "r": tr.r(price) if (tr and price) else 0.0, "mfe_r": tr.mfe_r if tr else 0.0,
+                "checkpoint": bool(tr and tr.checkpoint_done), "opened_ts": t.filled_ts or t.submitted_ts,
+                "risk_dollars": t.open_risk,
+            })
+        closed = [t for t in self.executor.closed if t.qty_filled]
+
+        def idx_chg(sym):
+            st = self.states.get(sym)
+            return chg(st) if st else None
+
+        return {
+            "ts": now, "day": self.session.day.isoformat(), "mode": self.cfg.mode,
+            "session": {"open": self.session.open, "close": self.session.close, "half_day": self.session.half_day,
+                        "flatten_at": self.plan.flatten_at, "last_entry": self.plan.last_entry},
+            "budget": {"capital": self.cfg.account.capital, "equity": acct.equity, "start_equity": self.start_equity,
+                       "pnl": acct.equity - self.start_equity},
+            "today_r": self.today_r, "losers_today": self.losers_today, "counts": dict(self.counts),
+            "closed_today": [{"symbol": t.symbol, "direction": t.direction, "pnl": t.pnl(), "exit": t.exit_reason,
+                              "closed_ts": t.closed_ts} for t in closed],
+            "market": {"z": round(mz, 3), "spy_change": idx_chg("SPY"), "qqq_change": idx_chg("QQQ")},
+            "symbols": syms, "trades": trades, "flags": self.plan.flags,
+            "blocked_now": self.plan.blocked_reason(now), "guardian_block": self.guardian_block(),
+            "veto_score": self.veto_score.d, **(extra or {}),
+        }
 
     # --------------------------------------------------------------- end
     def finish(self) -> dict:
