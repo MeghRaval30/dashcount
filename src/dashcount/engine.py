@@ -308,8 +308,10 @@ class Engine:
         if self.chain is None:
             return self._after_veto(c, size.qty, base, f, ChainResult("allow"))
 
+        # snapshot everything on this thread; the worker only adds Kronos's odds
         bars = self.states[c.symbol].bars.context(self.cfg.veto.kronos.context_bars)
-        brief = lambda odds: self._briefing(c, f, odds)  # noqa: E731
+        bdata = self._briefing_data(c, f)
+        brief = lambda odds: briefing.build({**bdata, "kronos_odds": odds})  # noqa: E731
         self.pending_veto.add(c.symbol)
         if self.live:
             fut = self._outer.submit(self._run_chain, c, bars, brief)
@@ -464,7 +466,7 @@ class Engine:
         return t.qty_filled * (t.avg_entry + t.exit_avg) * bps / 1e4
 
     # ---------------------------------------------------------- briefing
-    def _briefing(self, c: Candidate, f: dict, odds: float | None) -> str:
+    def _briefing_data(self, c: Candidate, f: dict) -> dict:
         st = self.states[c.symbol]
         closes = [b.close for b in st.bars.bars[-30:]]
 
@@ -487,10 +489,10 @@ class Engine:
             "minutes_since_open": (self.now - self.session.open) / 60,
             "minutes_to_close": (self.session.close - self.now) / 60, "flags": self.plan.flags,
             "open_positions": [(t.direction, self.states[t.symbol].item.sector) for t in self.executor.active()],
-            "today_r": self.today_r, "losers_today": self.losers_today, "kronos_odds": odds,
+            "today_r": self.today_r, "losers_today": self.losers_today, "kronos_odds": None,
             "memory": [{"text": describe(m), "r": m.outcome_r} for m in mem],
         }
-        return briefing.build(b)
+        return b
 
     # --------------------------------------------------------------- end
     def finish(self) -> dict:

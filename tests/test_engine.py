@@ -96,3 +96,44 @@ def test_guardian_halt_blocks_new_entries(market, tmp_path, any_count):
     att = read_table(tmp_path / "g", "attempts")
     assert (att["action"] == "taken").sum() == 0
     assert att["action"].str.contains("guardian").any()
+
+
+class SlowAllow:
+    def assess(self, c, bars):
+        import time as _t
+
+        _t.sleep(0.01)
+        return VetoResult("kronos", "allow", "none", odds=0.7, latency_s=0.01)
+
+
+def test_live_mode_async_veto_path(market, tmp_path, any_count):
+    """Live mode runs vetoes on a worker thread and applies results via the inbox."""
+    import time as _t
+
+    from dashcount.models import Quote, Trade
+
+    c = cfg(gates={"min_true_count": -99.0, "market_against": -99.0}, hazards={"cost_mult": 0.0})
+    plan, tr, qu = market
+    rec = Recorder(tmp_path, "live", "v")
+    b = SimBroker(c.simulator)
+    eng = Engine(c, plan, b, VetoChain(c.veto, SlowAllow(), None, None), rec, feed="sip", live=True)
+    # replay by hand, draining the inbox like the live loop does
+    sym = sorted(tr)
+    events = []
+    for s in sym:
+        t = tr[s]
+        events += [(ts, 1, s, p, z) for ts, p, z in zip(t["ts"], t["price"], t["size"])]
+    events.sort()
+    for i, (ts, _, s, p, z) in enumerate(events):
+        eng.on_trade(Trade(s, ts, p, z))
+        if i % 200 == 0:
+            _t.sleep(0.002)
+            eng.drain_inbox()
+    eng._outer.shutdown(wait=True)
+    eng.drain_inbox()
+    eng.finish()
+    rec.flush("d")
+    att = read_table(tmp_path / "live", "attempts")
+    assert len(att) > 0
+    assert not eng.pending_veto                      # every veto came back
+    assert att["action"].isin(["taken"]).any() or att["action"].str.startswith(("skip", "missed")).any()
