@@ -100,6 +100,7 @@ def run_live(cfg: Config, real_money: bool = False, vetoes: str = "full", day: d
         log.info("%s is not a trading day. Nothing to do.", today)
         return
     session = cal.session(today)
+    keep_awake(True)
     acct_kind = "paper" if paper else "REAL-MONEY"
     notify.send(f"DashCount starting ({acct_kind}, {cfg.mode} mode) for {today}")
 
@@ -140,21 +141,37 @@ def run_live(cfg: Config, real_money: bool = False, vetoes: str = "full", day: d
 
     last_beat = last_flush = 0.0
     end_at = session.close + 120
+    errors = 0
+
+    def safely(fn, *a) -> None:
+        nonlocal errors
+        try:
+            fn(*a)
+        except Exception:
+            errors += 1
+            log.exception("engine error #%d", errors)
+            if errors == 25:
+                notify.send("25 engine errors today: flattening and blocking new entries. Check the logs.", priority="high")
+                st = GuardianState.load(gpath)
+                st.halted_day, st.halt_reason = day_s, "engine errors"
+                st.save(gpath)
+                engine.executor.flatten_all("engine errors")
+
     try:
         while time.time() < end_at:
             try:
                 ev = events.get(timeout=0.2)
                 n = 0
                 while True:
-                    (engine.on_trade if isinstance(ev, Trade) else engine.on_quote)(ev)
+                    safely(engine.on_trade if isinstance(ev, Trade) else engine.on_quote, ev)
                     n += 1
                     if n > 5000:
                         break
                     ev = events.get_nowait()
             except queue.Empty:
                 pass
-            engine.drain_inbox()
-            engine.advance_to(time.time())
+            safely(engine.drain_inbox)
+            safely(engine.advance_to, time.time())
             now = time.time()
             if now - last_beat >= 5:
                 last_beat = now
@@ -176,11 +193,24 @@ def run_live(cfg: Config, real_money: bool = False, vetoes: str = "full", day: d
         rec.flush(day_s)
         write_json(veto_score_path(), score.d)
         beat({"status": "done"})
+        keep_awake(False)
     path, s = write_report(rec.root, ROOT / "reports")
     log.info("\n%s\nreport: %s", console(s), path)
     if row:
         notify.send(f"Day done {today}: P&L {row['pnl']:+,.2f}, trades {row['trades']} "
                     f"({row['wins']}W/{row['losses']}L), equity {row['end_equity']:,.2f}")
+
+
+def keep_awake(on: bool = True) -> None:
+    """Ask Windows not to sleep while this process is trading (released on exit)."""
+    try:
+        import ctypes
+
+        ES_CONTINUOUS, ES_SYSTEM_REQUIRED = 0x80000000, 0x00000001
+        flags = ES_CONTINUOUS | (ES_SYSTEM_REQUIRED if on else 0)
+        ctypes.windll.kernel32.SetThreadExecutionState(flags)
+    except Exception:
+        pass
 
 
 def _warm(chain) -> None:

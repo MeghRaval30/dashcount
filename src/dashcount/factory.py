@@ -46,8 +46,8 @@ def load_memory(before_ts: float | None = None, exclude_runs: tuple[str, ...] = 
     if not root.exists():
         return mem
     for run in runs or sorted(p for p in root.iterdir() if p.is_dir()):
-        if run.name in exclude_runs:
-            continue
+        if run.name in exclude_runs or "synthetic" in run.name:
+            continue                    # never let fake demo days into the model's memory
         att = read_table(run, "attempts")
         out = read_table(run, "outcomes")
         if att.empty or out.empty:

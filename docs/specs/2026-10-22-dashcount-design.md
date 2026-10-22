@@ -222,7 +222,27 @@ cause, death map, veto scorecards, IEX vs SIP comparison.
   `--real-money` flag. Before real money from India: check RBI LRS limits on
   margin/shorting and the US PDT rule.
 
-## 14. Out of scope for v1
+## 14. Implementation notes (v1 build, 2026-10-22)
+
+Decisions made while building, measured on the RTX 5060 laptop:
+
+* **Count normalisation**: the session EW RMS is *seeded* at
+  κ·sqrt(V·s) (κ = 3) and *floored* at the coin-flip level sqrt(V·s).
+* **Kronos**: Kronos-small (≈4.6 s for 30 paths × 30 min; Kronos-base ≈16 s).
+  Odds use predicted *closes* only — the model's predicted highs/lows are noisy
+  (high < low happens) and would fake touches. Runs are serialised (the model
+  is not thread-safe) and the weights are loaded before the first decision.
+* **Fin-R1**: ≈6 s per verdict (Q4_K_M). A first prompt vetoed clean setups
+  ("coward"); the prompt now makes ALLOW the default and lists explicit,
+  numeric red flags, and the briefing adds pre-computed facts (net move, steps
+  with the trade, direction changes, memory wins/losses).
+* **Live safety extras**: Windows is asked not to sleep while trading; 25 engine
+  errors in a day ⇒ flatten and halt; synthetic demo runs never enter memory.
+* **Data quirks handled**: pandas 3 time units (epoch conversion is
+  unit-independent), quote de-duplication keeps the first quote, late live
+  prints are folded into the open minute.
+
+## 15. Out of scope for v1
 
 Singapore, a third pad, models trained on the dataset, Kronos fine-tuning, paid
 SIP live feed (decided by the scoreboard).

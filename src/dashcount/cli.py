@@ -51,10 +51,12 @@ def _latest_run() -> Path | None:
 def cmd_check(args, cfg) -> int:
     ok = True
 
-    def line(good: bool, what: str, detail: str = "") -> None:
+    def line(good: bool, what: str, detail: str = "", optional: bool = False) -> None:
         nonlocal ok
-        ok &= good
-        print(f"  [{'OK' if good else '!!'}] {what}" + (f" - {detail}" if detail else ""))
+        if not optional:
+            ok &= good
+        mark = "OK" if good else ("--" if optional else "!!")
+        print(f"  [{mark}] {what}" + (f" - {detail}" if detail else ""))
 
     print("DashCount readiness check")
     try:
@@ -117,7 +119,8 @@ def cmd_check(args, cfg) -> int:
 
     e = EarningsCalendar(Store().earnings_dir()).symbols_on(dt.date.today() - dt.timedelta(days=7))
     line(e is not None, "Earnings calendar (Nasdaq)", f"{len(e)} reporters a week ago" if e is not None else "unreachable")
-    line(bool(os.environ.get("NTFY_TOPIC")), "Phone alerts (ntfy)", "optional: set NTFY_TOPIC in .env")
+    line(bool(os.environ.get("NTFY_TOPIC")), "Phone alerts (ntfy)",
+         "on" if os.environ.get("NTFY_TOPIC") else "optional: set NTFY_TOPIC in .env", optional=True)
     print("READY" if ok else "Some checks need attention (see !! lines).")
     return 0 if ok else 1
 
