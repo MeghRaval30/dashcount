@@ -12,7 +12,9 @@ account:
 universe:
   min_price: 10.0
   min_avg_dollar_volume: 50000000   # 20-day average, USD
-  watchlist_size: 28                # + SPY and QQQ = 30 live symbols (free-plan limit)
+  # Free data plan: 30 stream subscriptions, and trades + quotes count separately.
+  # 14 stocks x (trades + quotes) + SPY/QQQ trades = 30.
+  watchlist_size: 14
   market_symbols: [SPY, QQQ]
 
 level_map:

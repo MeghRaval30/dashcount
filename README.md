@@ -30,7 +30,7 @@ It **skips obstacles** (hazards, earnings, scheduled releases), **counts aggress
 | See it work right now, no keys needed (fake market) | `uv run dashcount demo --days 3` |
 | Download history for practice (resumable) | `uv run dashcount download --start 2026-08-01 --end 2026-09-30` |
 | Practice on that history | `uv run dashcount practice --start 2026-08-01 --end 2026-09-30` |
-| Today's level map (watchlist + blocked windows) | `uv run dashcount plan` |
+| Today's level map (14-stock watchlist + blocked windows) | `uv run dashcount plan` |
 | Trade today on paper (Ollama + Guardian + bot) | `uv run dashcount run-day` |
 | Automatic every weekday at 18:25 IST | `powershell -ExecutionPolicy Bypass -File scripts\install_schedule.ps1` |
 | Latest report | `uv run dashcount scoreboard` |
@@ -47,7 +47,7 @@ Useful flags:
 ## How it works (the level)
 
 ```
- Level map (09:20 ET) ─► 28 in-play stocks + SPY/QQQ, earnings removed, blocked windows
+ Level map (09:20 ET) ─► 14 in-play stocks + SPY/QQQ, earnings removed, blocked windows
         │
  Market data ─► Features ─► Jump pads ─► Hazards ─► Count gates ─► Bet spread ─► Kronos ─► Fin-R1 ─► Bracket order
  (IEX live |    bars, VWAP   ORB,          spread,    true count    1%/2%/4%      30 paths   anonymised  target + stop
@@ -117,6 +117,7 @@ docs/specs/              the design we agreed on
 
 ## Honest limits
 
+- **The free plan streams 30 subscriptions, and trades and quotes count separately**, so the bot watches 14 stocks (trades + quotes) plus SPY/QQQ (trades). The paid plan lifts this: set `universe.watchlist_size` higher.
 - **Live data is IEX-only on the free plan.** That's one exchange's slice, so the live count is noisier. Practice can compare `--feed iex` vs `--feed sip` to decide whether the $99/month full feed is worth it.
 - **Kronos was trained on data up to June 2024.** Only judge it on July 2024 onwards. Its edge is small: think card counting, not a crystal ball.
 - **The universe is today's index members** (survivorship bias in old practice runs).

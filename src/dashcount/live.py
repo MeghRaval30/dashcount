@@ -47,7 +47,7 @@ def _sleep_until(ts: float, why: str) -> None:
 class LiveFeed:
     """Alpaca IEX websocket -> thread-safe event queue."""
 
-    def __init__(self, symbols: list[str], out: queue.Queue) -> None:
+    def __init__(self, symbols: list[str], out: queue.Queue, trades_only: tuple[str, ...] = ()) -> None:
         from alpaca.data.enums import DataFeed
         from alpaca.data.live import StockDataStream
 
@@ -55,7 +55,8 @@ class LiveFeed:
         self.stream = StockDataStream(k, s, feed=DataFeed.IEX)
         self.out = out
         self.stream.subscribe_trades(self._on_trade, *symbols)
-        self.stream.subscribe_quotes(self._on_quote, *symbols)
+        # the market funds only feed the count, so they don't need quotes (saves stream slots)
+        self.stream.subscribe_quotes(self._on_quote, *[s for s in symbols if s not in trades_only])
         self.thread = threading.Thread(target=self._run, name="alpaca-data", daemon=True)
 
     def start(self) -> None:
@@ -144,7 +145,7 @@ def run_live(cfg: Config, real_money: bool = False, vetoes: str = "full", day: d
         log.info("started after the open: backfilled %d minute bars of today's session", n)
 
     events: queue.Queue = queue.Queue()
-    feed = LiveFeed(plan.symbols, events)
+    feed = LiveFeed(plan.symbols, events, trades_only=tuple(cfg.universe.market_symbols))
     _sleep_until(session.open - 60, "the open")
     feed.start()
     notify.send(f"Live on {len(plan.symbols)} symbols: {', '.join(s for s in plan.symbols if s not in cfg.universe.market_symbols)}")

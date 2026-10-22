@@ -150,8 +150,10 @@ def cmd_demo(args, cfg) -> int:
 def cmd_download(args, cfg) -> int:
     from .download import download
 
+    from .data.alpaca_data import AlpacaData
+
     feeds = tuple(args.feed.split(","))
-    download(cfg, args.start, args.end, feeds=feeds, ticks=not args.no_ticks)
+    download(cfg, args.start, args.end, feeds=feeds, ticks=not args.no_ticks, data=AlpacaData(per_minute=args.rate))
     return 0
 
 
@@ -287,6 +289,7 @@ def main(argv: list[str] | None = None) -> int:
     c.add_argument("--end", required=True)
     c.add_argument("--feed", default="iex", help="tick feed(s): iex, sip or iex,sip")
     c.add_argument("--no-ticks", action="store_true", help="only daily/minute bars and earnings")
+    c.add_argument("--rate", type=int, default=190, help="max Alpaca requests per minute (use ~100 while trading live)")
     c.set_defaults(fn=cmd_download)
 
     c = sub.add_parser("practice", help="replay downloaded history through the bot")
