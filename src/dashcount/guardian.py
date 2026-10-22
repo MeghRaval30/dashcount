@@ -40,13 +40,13 @@ class GuardianState:
             return cls()
 
     def save(self, path: Path) -> None:
+        from .state import atomic_write
+
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".tmp")
         d = asdict(self)
         d["events"] = d["events"][-50:]
-        tmp.write_text(json.dumps(d, indent=1))
-        tmp.replace(path)
+        atomic_write(path, json.dumps(d, indent=1))
 
     def entry_block(self, today: str) -> str | None:
         if self.panic:

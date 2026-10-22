@@ -189,8 +189,9 @@ def run_live(cfg: Config, real_money: bool = False, vetoes: str = "full", day: d
             now = time.time()
             if now - last_beat >= 5:
                 last_beat = now
-                beat({"status": "trading", "positions": [t.symbol for t in engine.executor.active()]})
-                write_json(bot_positions_path(), {"ts": now, "symbols": [t.symbol for t in engine.executor.active()]})
+                syms = [t.symbol for t in engine.executor.active()]
+                safely(beat, {"status": "trading", "positions": syms})
+                safely(write_json, bot_positions_path(), {"ts": now, "symbols": syms})
             if now - last_status >= 300:
                 last_status = now
                 acct = engine.account()
@@ -200,8 +201,8 @@ def run_live(cfg: Config, real_money: bool = False, vetoes: str = "full", day: d
                          acct.equity, events.qsize())
             if now - last_flush >= 60:
                 last_flush = now
-                rec.flush(day_s)
-                write_json(veto_score_path(), score.d)
+                safely(rec.flush, day_s)
+                safely(write_json, veto_score_path(), score.d)
     except KeyboardInterrupt:
         log.warning("interrupted: flattening")
         engine.executor.flatten_all("interrupted")

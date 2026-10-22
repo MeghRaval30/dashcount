@@ -97,3 +97,19 @@ def test_capital_budget_view(tmp_path):
     again = Capital(10_000, tmp_path / "cap.json")             # baseline persists across restarts
     assert again.view(Account(99_000, 400_000, 100_000)).equity == 9_000
     assert Capital(None).view(Account(5, 6, 7)).equity == 5
+
+
+def test_atomic_write_survives_reader_holding_file(tmp_path):
+    """Windows: replacing a file another process has open fails; we must not crash."""
+    import json as _json
+
+    from dashcount.state import atomic_write, read_json
+
+    p = tmp_path / "hb.json"
+    atomic_write(p, _json.dumps({"ts": 1}))
+    with open(p, "r", encoding="utf-8"):          # a reader holds it open
+        atomic_write(p, _json.dumps({"ts": 2}))   # must not raise
+    assert read_json(p)["ts"] in (1, 2)
+    atomic_write(p, _json.dumps({"ts": 3}))
+    assert read_json(p)["ts"] == 3
+    assert not list(tmp_path.glob("*.tmp"))

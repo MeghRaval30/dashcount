@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 from pathlib import Path
 
@@ -64,10 +65,30 @@ class Capital:
         return Account(equity=eq, buying_power=max(min(acct.buying_power, 4 * eq), 0.0), last_equity=last)
 
 
+def atomic_write(path: Path, text: str) -> None:
+    """Write via a temp file + rename. On Windows the rename fails with
+    'access denied' while another process (the Guardian, the dashboard) has the
+    file open for reading, so retry briefly, then fall back to a direct write."""
+    path = Path(path)
+    tmp = path.with_name(path.name + f".{os.getpid()}.tmp")
+    tmp.write_text(text, encoding="utf-8")
+    for _ in range(20):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            time.sleep(0.05)
+    try:
+        path.write_text(text, encoding="utf-8")
+    finally:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+
+
 def write_json(path: Path, obj) -> None:
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(obj, indent=1, default=str))
-    tmp.replace(path)
+    atomic_write(path, json.dumps(obj, indent=1, default=str))
 
 
 def read_json(path: Path, default=None):
