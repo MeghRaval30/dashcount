@@ -40,7 +40,7 @@ def run_practice(cfg: Config, start, end, feed: str = "iex", vetoes: str = "full
         log.warning("practice starts before %s: Kronos saw this period in training; judge its veto only from %s on",
                     cfg.veto.kronos.judge_from, cfg.veto.kronos.judge_from)
 
-    broker = SimBroker(cfg.simulator)
+    broker = SimBroker(cfg.simulator, starting_equity=cfg.account.capital or cfg.simulator.starting_equity)
     guardian = GuardianRules(cfg.guardian_mode)
     chain = make_chain(cfg, vetoes)
     memory = AttemptMemory()

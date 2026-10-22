@@ -17,7 +17,8 @@ from .config import Config
 from .data.alpaca_data import keys_from_env
 from .data.alpaca_trading import is_paper, trading_client
 from .guardian import Action, GuardianRules, GuardianState, round_trips
-from .state import bot_positions_path, guardian_path, heartbeat_age, read_json
+from .models import Account
+from .state import Capital, bot_positions_path, capital_path, guardian_path, heartbeat_age, read_json
 from .timeutil import ET, calendar
 
 log = logging.getLogger(__name__)
@@ -53,6 +54,7 @@ def run_guardian(cfg: Config, once: bool = False) -> None:
     cal = calendar()
     path = guardian_path()
     unknown_since: dict[str, float] = {}
+    capital = Capital(cfg.account.capital, capital_path())
     alerted_not_flat = False
     log.info("Guardian on (%s account, %s mode)", "paper" if paper else "REAL", cfg.mode)
     while True:
@@ -74,8 +76,9 @@ def run_guardian(cfg: Config, once: bool = False) -> None:
                 time.sleep(30)
                 continue
             acct = tc.get_account()
-            equity = float(acct.equity)
-            rules.new_day(today.isoformat(), float(acct.last_equity) or equity)
+            view = capital.view(Account(float(acct.equity), float(acct.buying_power or 0), float(acct.last_equity or 0)))
+            equity = view.equity
+            rules.new_day(today.isoformat(), view.last_equity or equity)
             positions = {p.symbol: p for p in tc.get_all_positions()}
             exposure = bool(positions)
             actions = rules.evaluate(now, equity, flatten_at, exposure)

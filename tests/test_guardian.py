@@ -83,3 +83,17 @@ def test_round_trips_long_short_and_flip():
     ]
     assert round_trips(fills) == [-10, 10, -8]
     assert trailing_losers([5, -1, -2]) == 2 and trailing_losers([-1, 3]) == 0
+
+
+def test_capital_budget_view(tmp_path):
+    from dashcount.models import Account
+    from dashcount.state import Capital
+
+    cap = Capital(10_000, tmp_path / "cap.json")
+    v = cap.view(Account(100_000, 400_000, 100_000))
+    assert (v.equity, v.buying_power, v.last_equity) == (10_000, 40_000, 10_000)
+    v = cap.view(Account(100_500, 400_000, 100_000))          # bot made $500
+    assert v.equity == 10_500
+    again = Capital(10_000, tmp_path / "cap.json")             # baseline persists across restarts
+    assert again.view(Account(99_000, 400_000, 100_000)).equity == 9_000
+    assert Capital(None).view(Account(5, 6, 7)).equity == 5

@@ -20,6 +20,10 @@ ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG = ROOT / "config" / "default.yaml"
 
 
+class AccountCfg(BaseModel):
+    capital: float | None = None
+
+
 class UniverseCfg(BaseModel):
     min_price: float
     min_avg_dollar_volume: float
@@ -187,6 +191,7 @@ class PracticeCfg(BaseModel):
 
 class Config(BaseModel):
     mode: Literal["tournament", "real"]
+    account: AccountCfg = AccountCfg()
     universe: UniverseCfg
     level_map: LevelMapCfg
     features: FeaturesCfg

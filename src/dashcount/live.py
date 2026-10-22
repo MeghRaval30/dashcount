@@ -28,7 +28,7 @@ from .levelmap import LevelMap
 from .models import Quote, Trade
 from .recorder import Recorder
 from .scoreboard import console, write_report
-from .state import beat, bot_positions_path, guardian_path, read_json, veto_score_path, write_json
+from .state import Capital, beat, bot_positions_path, capital_path, guardian_path, read_json, veto_score_path, write_json
 from .timeutil import ET, calendar, et_ts, fmt_et
 
 log = logging.getLogger(__name__)
@@ -128,9 +128,12 @@ def run_live(cfg: Config, real_money: bool = False, vetoes: str = "full", day: d
     memory = load_memory()
     gpath = guardian_path()
     day_s = today.isoformat()
+    capital = Capital(cfg.account.capital, capital_path())
     engine = Engine(cfg, plan, broker, chain, rec, feed="iex", live=True,
                     guardian_block=lambda: GuardianState.load(gpath).entry_block(day_s),
-                    memory=memory, veto_score=score, alert=notify.send)
+                    memory=memory, veto_score=score, alert=notify.send, capital=capital)
+    log.info("trading budget: %s (budget equity now %s)",
+             f"${cfg.account.capital:,.0f}" if cfg.account.capital else "whole account", f"{engine.account().equity:,.2f}")
     broker.post = engine.inbox.put
 
     events: queue.Queue = queue.Queue()

@@ -3,6 +3,12 @@
 
 mode: tournament            # tournament | real  (risk dial; NOT the Alpaca account type)
 
+account:
+  # Money the bot is allowed to use. Sizing, loss limits and the drawdown fuse all
+  # work off this budget (+ the bot's own P&L), not the whole Alpaca account.
+  # null = use the whole account. Practice runs start with exactly this much.
+  capital: 10000
+
 universe:
   min_price: 10.0
   min_avg_dollar_volume: 50000000   # 20-day average, USD

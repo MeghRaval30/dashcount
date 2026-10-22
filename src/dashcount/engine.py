@@ -85,6 +85,7 @@ class Engine:
         memory: AttemptMemory | None = None,
         veto_score: VetoScore | None = None,
         alert: Callable[[str], None] = lambda m: None,
+        capital=None,
     ) -> None:
         self.cfg = cfg
         self.plan = plan
@@ -100,6 +101,7 @@ class Engine:
         self.memory = memory if memory is not None else AttemptMemory()
         self.veto_score = veto_score or VetoScore()
         self.alert = alert
+        self.capital = capital           # state.Capital (live budget) or None
         self.inbox: queue.Queue = queue.Queue()
         # live: veto calls run one at a time off the event thread
         self._outer = cf.ThreadPoolExecutor(max_workers=1, thread_name_prefix="decide") if live else None
@@ -122,7 +124,7 @@ class Engine:
         self.today_r = 0.0
         self.losers_today = 0
         self.counts = {"attempts": 0, "taken": 0}
-        self.start_equity = broker.account().equity
+        self.start_equity = self.account().equity
         if self.sim is not None:
             self.sim.start_day()
             self.sim.normal_volume_fn = self._sip_minute_volume
@@ -131,6 +133,11 @@ class Engine:
         self.finished = False
 
     # ------------------------------------------------------------ helpers
+    def account(self):
+        """The account as the bot sees it: its capital budget, not the whole account."""
+        a = self.broker.account()
+        return self.capital.view(a) if self.capital is not None else a
+
     def _sip_minute_volume(self, symbol: str, ts: float) -> float | None:
         st = self.states.get(symbol)
         return st.normal_minute_volume(ts, sip=True) if st else None
@@ -221,7 +228,7 @@ class Engine:
     def _guardian_check(self) -> None:
         if self.guardian is None:
             return
-        acct = self.broker.account()
+        acct = self.account()
         exposure = bool(self.broker.positions()) or bool(self.executor.active())
         for a in self.guardian.evaluate(self.now, acct.equity, self.plan.flatten_at, exposure):
             self._guardian_action(a.kind, a.reason)
@@ -296,7 +303,7 @@ class Engine:
             return self._skip(c, base, "skip_hazard:" + fired[0], f)
         if info.get("gate"):
             return self._skip(c, base, "skip_count:" + info["gate"], f)
-        acct = self.broker.account()
+        acct = self.account()
         st = self.states[c.symbol]
         sip5 = (st.normal_minute_volume(self.now, sip=True) or 0) * 5 or None
         size = sizing.size_trade(c, f["tc"], acct.equity, acct.buying_power, self.executor.open_risk_dollars(),
@@ -504,7 +511,7 @@ class Engine:
             for g in list(lst):
                 st = self.states[sym]
                 self._resolve_ghost(g, "eod", st.last_price or g.cand.entry)
-        acct = self.broker.account()
+        acct = self.account()
         trades = [t for t in self.executor.closed if t.qty_filled > 0]
         row = {
             "day": self.session.day, "start_equity": self.start_equity, "end_equity": acct.equity,
