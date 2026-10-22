@@ -136,6 +136,13 @@ def run_live(cfg: Config, real_money: bool = False, vetoes: str = "full", day: d
              f"${cfg.account.capital:,.0f}" if cfg.account.capital else "whole account", f"{engine.account().equity:,.2f}")
     broker.post = engine.inbox.put
 
+    if time.time() > session.open + 120:
+        from .levelmap import to_bars
+
+        today_bars = to_bars(AlpacaData().minutes(plan.symbols, session.open, time.time(), "iex"))
+        n = engine.seed_today(today_bars, time.time())
+        log.info("started after the open: backfilled %d minute bars of today's session", n)
+
     events: queue.Queue = queue.Queue()
     feed = LiveFeed(plan.symbols, events)
     _sleep_until(session.open - 60, "the open")

@@ -94,6 +94,24 @@ class BarSeries:
         self.vwaps.append(self.vwap if self.vwap is not None else b.close)
         return b
 
+    def seed(self, bars: list[Bar]) -> None:
+        """Backfill today's completed minutes (live start or restart after the open)."""
+        for b in bars:
+            if self.bars and b.start <= self.bars[-1].start:
+                continue
+            if b.volume > 0:
+                typical = (b.high + b.low + b.close) / 3
+                self._pv += typical * b.volume
+                self._v += b.volume
+                self.volume_today += b.volume
+            if self.day_open is None:
+                self.day_open = b.open
+            if b.high > self.high:
+                self.high, self.high_ts = b.high, b.start + 59
+            if b.low < self.low:
+                self.low, self.low_ts = b.low, b.start + 59
+            self._finish(Bar(b.symbol, b.start, b.open, b.high, b.low, b.close, b.volume, b.trades))
+
     def _update_atr(self, b: Bar) -> None:
         prev_close = self.bars[-1].close if self.bars else (self.history[-1].close if self.history else b.open)
         tr = max(b.high - b.low, abs(b.high - prev_close), abs(b.low - prev_close))

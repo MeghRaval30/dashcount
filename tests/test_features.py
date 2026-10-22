@@ -64,3 +64,17 @@ def test_normal_minute_volume_scales_with_feed_share():
     st = state(profile_per_5min=50_000, feed_share=0.02)
     assert st.normal_minute_volume(at("10:00")) == 50_000 / 5 * 0.02
     assert st.normal_minute_volume(at("10:00"), sip=True) == 10_000
+
+
+def test_seed_today_backfills_vwap_open_and_atr():
+    from dashcount.models import Bar
+
+    st = state()
+    t0 = at("09:30")
+    bars = [Bar("TEST", t0 + 60 * i, 100 + i, 101 + i, 99 + i, 100.5 + i, 1000) for i in range(30)]
+    st.bars.seed(bars)
+    assert st.bars.day_open == 100 and len(st.bars.bars) == 30 and len(st.bars.vwaps) == 30
+    assert st.bars.vwap is not None and 100 < st.bars.vwap < 130
+    assert st.bars.atr is not None and st.bars.high == 130
+    st.bars.seed(bars[:5])                       # idempotent for already-seen minutes
+    assert len(st.bars.bars) == 30

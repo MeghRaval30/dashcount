@@ -152,6 +152,24 @@ class Engine:
     def schedule(self, due: float, fn: Callable[[], None]) -> None:
         heapq.heappush(self._sched, (due, next(self._seq), fn))
 
+    def seed_today(self, bars: dict[str, list], upto: float) -> int:
+        """Live start after the open: load today's earlier minutes so VWAP, the
+        day's open/high/low, ATR and the setups see the whole session."""
+        n = 0
+        cutoff = float(int(upto // 60) * 60)
+        for sym, lst in bars.items():
+            st = self.states.get(sym)
+            if st is None:
+                continue
+            done = [b for b in lst if self.session.open <= b.start and b.start + 60 <= cutoff]
+            st.bars.seed(done)
+            if done:
+                st.last_price = done[-1].close
+                n += len(done)
+        self.next_minute = max(self.next_minute, cutoff + 60)
+        self.now = max(self.now, cutoff)
+        return n
+
     # -------------------------------------------------------------- time
     def advance_to(self, ts: float) -> None:
         while True:
