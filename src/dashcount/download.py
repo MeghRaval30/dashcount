@@ -104,7 +104,9 @@ def download(cfg: Config, start, end, feeds: tuple[str, ...] = ("iex",), ticks: 
                 tdir = store.ticks_dir(feed, d)
                 tdir.mkdir(parents=True, exist_ok=True)
                 trades = data.trades(want, s.open, s.close, feed)
-                quotes = data.quotes(want, s.open, s.close, feed)
+                # like live: the market funds only feed the count, so no quotes for them
+                qwant = [x for x in want if x not in cfg.universe.market_symbols]
+                quotes = data.quotes(qwant, s.open, s.close, feed) if qwant else {}
                 for x in want:
                     q = quotes.get(x, pd.DataFrame(columns=["ts", "bid", "ask", "bid_size", "ask_size"]))
                     q.to_parquet(store.quotes_path(feed, d, x), index=False)
