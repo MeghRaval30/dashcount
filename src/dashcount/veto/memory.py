@@ -7,6 +7,7 @@ before `now` are returned.
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
 
 import numpy as np
@@ -52,8 +53,10 @@ class AttemptMemory:
         if self._mat is None:
             self._mat = np.vstack([vector(it.features) for it in self.items])
         m = self._mat[pool]
-        mu = np.nanmean(m, axis=0)
-        sd = np.nanstd(m, axis=0)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)   # all-missing feature columns
+            mu = np.nanmean(m, axis=0)
+            sd = np.nanstd(m, axis=0)
         sd[~np.isfinite(sd) | (sd == 0)] = 1.0
         mu[~np.isfinite(mu)] = 0.0
         z = (m - mu) / sd
