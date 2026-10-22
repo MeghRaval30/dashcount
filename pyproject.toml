@@ -35,12 +35,15 @@ dev = [
 [project.scripts]
 dashcount = "dashcount.cli:main"
 
+[project.gui-scripts]
+dashcount-ui = "dashcount_ui.app:main"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/dashcount"]
+packages = ["src/dashcount", "src/dashcount_ui"]
 
 [tool.uv.sources]
 torch = [{ index = "pytorch-cu128" }]

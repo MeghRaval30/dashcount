@@ -1,0 +1,93 @@
+"""Dashboard smoke tests (offscreen Qt)."""
+
+import json
+import os
+import time
+
+import pytest
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+pytest.importorskip("PySide6")
+
+
+@pytest.fixture(scope="module")
+def demo_dir(tmp_path_factory):
+    from dashcount_ui.demo import build_demo
+
+    old = os.environ.get("DASHCOUNT_DATA")
+    d = build_demo(tmp_path_factory.mktemp("demo"))
+    yield d
+    if old is None:
+        os.environ.pop("DASHCOUNT_DATA", None)
+    else:
+        os.environ["DASHCOUNT_DATA"] = old
+
+
+def test_datasource_reads_demo(demo_dir):
+    from dashcount_ui.datasource import DataSource
+
+    ds = DataSource(data=demo_dir)
+    snap = ds.snapshot()
+    assert snap and snap["budget"]["capital"] == 10000 and len(snap["symbols"]) == 16
+    assert ds.bot_state()[0] == "LIVE"
+    j = ds.journal_new()
+    assert j and {"ts", "kind", "text"} <= set(j[0])
+    assert ds.journal_new() == []                    # incremental
+    h = ds.history()
+    assert len(h["days"]) == 2 and "error" not in h
+
+
+def test_bot_state_variants(tmp_path):
+    from dashcount_ui.datasource import DataSource
+
+    ds = DataSource(data=tmp_path)
+    assert ds.bot_state()[0] == "OFFLINE"
+    (tmp_path / "state").mkdir()
+    (tmp_path / "state" / "heartbeat.json").write_text(json.dumps({"ts": time.time(), "status": "waiting:the open"}))
+    assert ds.bot_state()[0] == "WAITING"
+    (tmp_path / "state" / "heartbeat.json").write_text(json.dumps({"ts": time.time() - 999, "status": "trading"}))
+    assert ds.bot_state()[0] == "IDLE"
+
+
+def test_window_renders(demo_dir, tmp_path):
+    from PySide6.QtWidgets import QApplication
+
+    from dashcount_ui import pixel as px
+    from dashcount_ui.app import MainWindow
+    from dashcount_ui.datasource import DataSource
+
+    app = QApplication.instance() or QApplication([])
+    px.load_fonts()
+    w = MainWindow(DataSource(data=demo_dir), demo=True)
+    w.resize(1360, 860)
+    w.show()
+    app.processEvents()
+    img = w.grab()
+    assert img.width() >= 1100 and img.height() >= 700
+    assert w.header.chips and any(k == "eq" for k, *_ in w.header.chips)
+    w.toggle_map()
+    w.toggle_map()
+    w.start_day()                                     # demo mode: refuses, shows a toast
+    assert "Demo" in w.footer.toast
+    w.close()
+
+
+def test_sounds_synthesise(tmp_path):
+    import wave
+
+    from dashcount_ui.sound import write_tunes
+
+    paths = write_tunes(tmp_path)
+    with wave.open(str(paths["win"])) as f:
+        assert f.getnframes() > 1000
+
+
+def test_icon_and_fonts(tmp_path):
+    from PySide6.QtWidgets import QApplication
+
+    from dashcount_ui import pixel as px
+
+    QApplication.instance() or QApplication([])
+    assert (px.FONT_DIR / "PressStart2P-Regular.ttf").exists()
+    px.save_ico(tmp_path / "x.ico")
+    assert (tmp_path / "x.ico").exists() or (tmp_path / "x.png").exists()

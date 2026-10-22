@@ -43,6 +43,20 @@ class Ghost:
     features: dict
 
 
+def friendly_action(action: str) -> str:
+    """'skip_hazard:spread_blowout' -> 'skipped: spread blowout' (journal wording)."""
+    kind, _, detail = action.partition(":")
+    detail = detail.replace("_", " ")
+    return {
+        "skip_hazard": f"skipped: {detail} hazard",
+        "skip_count": f"skipped: {detail}",
+        "skip_size": "skipped: bet size came out zero",
+        "skip_veto_unavailable": "skipped: AI check unavailable",
+        "missed_jump": "skipped: price ran away (missed the jump)",
+        "skip_late": f"skipped: {detail} by the time the AI answered",
+    }.get(kind, action.replace("_", " "))
+
+
 class VetoScore:
     """Ghost-trade scorecard per veto source (profit saved = -sum R of vetoed ghosts)."""
 
@@ -418,7 +432,7 @@ class Engine:
     def _skip(self, c: Candidate, base: dict, action: str, f: dict, vetoed_by: str = "") -> None:
         k = base.get("kronos_odds")
         fr = base.get("finr1_reason")
-        why = action.replace("skip_", "").replace("_", " ")
+        why = friendly_action(action)
         if action.startswith("vetoed:kronos") and k is not None:
             why = f"vetoed by Kronos ({k * 100:.0f}% odds)"
         elif action.startswith("vetoed:finr1"):
