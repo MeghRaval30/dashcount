@@ -42,6 +42,10 @@ class BarSeries:
     # -- updates -----------------------------------------------------------
     def on_trade(self, t: Trade) -> None:
         start = float(int(t.ts // 60) * 60)
+        if self.bars and start <= self.bars[-1].start:
+            # a late print for a minute that is already closed (live feed lag):
+            # count it in the minute that is still open
+            start = self.bars[-1].start + 60
         if self._cur is not None and start > self._cur.start:
             # The engine normally closes bars on its clock; this is a fallback.
             self._finish(self._cur)

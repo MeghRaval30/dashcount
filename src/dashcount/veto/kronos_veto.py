@@ -102,6 +102,8 @@ class KronosVeto:
         self.cfg = cfg
         self.device = device
         self._predictor = predictor
+        # Kronos keeps internal caches: never run two inferences at once
+        self._run_lock = threading.Lock()
 
     @property
     def predictor(self):
@@ -116,12 +118,14 @@ class KronosVeto:
         last = ts.iloc[-1]
         y_ts = pd.Series(pd.date_range(last + pd.Timedelta(minutes=1), periods=self.cfg.horizon_min, freq="min"))
         n = self.cfg.samples
-        torch.manual_seed(seed)
-        np.random.seed(seed % (2**32 - 1))
-        preds = self.predictor.predict_batch(
-            [df] * n, [ts] * n, [y_ts] * n, pred_len=self.cfg.horizon_min,
-            T=self.cfg.temperature, top_p=self.cfg.top_p, sample_count=1, verbose=False,
-        )
+        predictor = self.predictor
+        with self._run_lock:
+            torch.manual_seed(seed)
+            np.random.seed(seed % (2**32 - 1))
+            preds = predictor.predict_batch(
+                [df] * n, [ts] * n, [y_ts] * n, pred_len=self.cfg.horizon_min,
+                T=self.cfg.temperature, top_p=self.cfg.top_p, sample_count=1, verbose=False,
+            )
         return [p[["open", "high", "low", "close"]].to_numpy() for p in preds]
 
     def assess(self, c: Candidate, bars: list[Bar]) -> VetoResult:
