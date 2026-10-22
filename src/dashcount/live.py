@@ -150,9 +150,10 @@ def run_live(cfg: Config, real_money: bool = False, vetoes: str = "full", day: d
     feed.start()
     notify.send(f"Live on {len(plan.symbols)} symbols: {', '.join(s for s in plan.symbols if s not in cfg.universe.market_symbols)}")
 
-    last_beat = last_flush = 0.0
+    last_beat = last_flush = last_status = 0.0
     end_at = session.close + 120
     errors = 0
+    n_events = {"trade": 0, "quote": 0}
 
     def safely(fn, *a) -> None:
         nonlocal errors
@@ -174,7 +175,9 @@ def run_live(cfg: Config, real_money: bool = False, vetoes: str = "full", day: d
                 ev = events.get(timeout=0.2)
                 n = 0
                 while True:
-                    safely(engine.on_trade if isinstance(ev, Trade) else engine.on_quote, ev)
+                    is_trade = isinstance(ev, Trade)
+                    n_events["trade" if is_trade else "quote"] += 1
+                    safely(engine.on_trade if is_trade else engine.on_quote, ev)
                     n += 1
                     if n > 5000:
                         break
@@ -188,6 +191,13 @@ def run_live(cfg: Config, real_money: bool = False, vetoes: str = "full", day: d
                 last_beat = now
                 beat({"status": "trading", "positions": [t.symbol for t in engine.executor.active()]})
                 write_json(bot_positions_path(), {"ts": now, "symbols": [t.symbol for t in engine.executor.active()]})
+            if now - last_status >= 300:
+                last_status = now
+                acct = engine.account()
+                log.info("status: %d trades + %d quotes received, %d setups seen, %d taken, %d open, "
+                         "budget equity %.2f, queue %d", n_events["trade"], n_events["quote"],
+                         engine.counts["attempts"], engine.counts["taken"], len(engine.executor.active()),
+                         acct.equity, events.qsize())
             if now - last_flush >= 60:
                 last_flush = now
                 rec.flush(day_s)

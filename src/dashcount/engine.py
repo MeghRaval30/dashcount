@@ -391,12 +391,18 @@ class Engine:
         if self.executor.busy(c.symbol) or block:
             return self._skip(c, base, "skip_late:" + (block or "busy"), f)
         self.counts["taken"] += 1
+        log.info("TAKEN %s %s %s qty %d entry %.2f stop %.2f target %.2f (true count %+.2f, bet %s%%)",
+                 c.symbol, c.pad, side_name(c.direction), qty, c.entry, c.stop, c.target, f.get("tc") or 0.0,
+                 base.get("risk_pct"))
         base["action"] = "taken"
         self.rec.add("attempts", base)
         self.attempt_features[c.attempt_id] = f
         self.executor.enter(c, qty, self.now, meta={"attempt": base})
 
     def _skip(self, c: Candidate, base: dict, action: str, f: dict, vetoed_by: str = "") -> None:
+        if self.live:
+            log.info("setup %s %s %s -> %s (true count %+.2f)", c.symbol, c.pad, side_name(c.direction),
+                     action, f.get("tc") or 0.0)
         base["action"] = action
         base.setdefault("decided_ts", self.now)
         self.rec.add("attempts", base)
