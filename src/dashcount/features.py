@@ -180,8 +180,8 @@ class FlowCounter:
     * each trade is signed by the quote rule (tick rule as fallback);
     * running count = signed volume over the last `window_s` seconds;
     * true count (z) = running count / its typical size, where the typical size
-      is a session EW RMS seeded by kappa * sqrt(normal window volume * avg trade
-      size) and floored at the random-coin-flip level sqrt(V * s).
+      is a bias-corrected session EW RMS (kappa * sqrt(V * s) until ~2 minutes of
+      samples exist), floored at the random-coin-flip level sqrt(V * s).
     """
 
     window_s: float = 120.0
@@ -194,6 +194,9 @@ class FlowCounter:
     _last_price: float = 0.0
     _last_sign: int = 0
     _ms: float | None = None
+    _n_samples: int = 0
+    _bias: float = 1.0
+    min_samples: int = 12          # ~2 minutes of samples before trusting the session estimate
     _next_sample: float = 0.0
     _n_trades: int = 0
     _vol: float = 0.0
@@ -244,11 +247,11 @@ class FlowCounter:
             self._next_sample = now
         self._prune(now)
         x2 = self._sum * self._sum
-        if self._ms is None:
-            seed = self.seed_sd()
-            self._ms = seed * seed if seed else x2
         alpha = 1.0 - math.exp(-self.sample_every_s * math.log(2) / self.halflife_s)
-        self._ms += alpha * (x2 - self._ms)
+        # bias-corrected EW mean of squares: no dependence on a guessed starting value
+        self._ms = (self._ms or 0.0) + alpha * (x2 - (self._ms or 0.0))
+        self._n_samples += 1
+        self._bias = 1.0 - (1.0 - alpha) ** self._n_samples
         self._next_sample = now + self.sample_every_s
 
     @property
@@ -266,10 +269,15 @@ class FlowCounter:
         self._prune(now)
         return self._sum
 
+    def typical(self) -> float:
+        """Typical size of the running count (its RMS), before the floor."""
+        if self._n_samples >= self.min_samples and self._ms:
+            return math.sqrt(self._ms / self._bias)
+        return self.seed_sd()
+
     def z(self, now: float) -> float:
         run = self.running(now)
-        sd = math.sqrt(self._ms) if self._ms else self.seed_sd()
-        sd = max(sd, self.floor_sd(), 1e-9)
+        sd = max(self.typical(), self.floor_sd(), 1e-9)
         return run / sd
 
 

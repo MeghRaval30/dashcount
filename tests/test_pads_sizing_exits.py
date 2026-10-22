@@ -98,7 +98,9 @@ def test_gates():
     assert sizing.gate(2.0, -2.0, LONG, g) == "market_against"
     assert sizing.gate(2.0, 2.0, SHORT, g) == "market_against"
     assert sizing.gate(2.0, 0.5, LONG, g) is None
-    assert math.isclose(sizing.true_count(3.0, 0.0, SHORT, g), -2.0, abs_tol=1e-3)
+    # 2/3 * 3 / sqrt((2/3)^2 + (1/3)^2) = 2.683
+    assert math.isclose(sizing.true_count(3.0, 0.0, SHORT, g), -2.683, abs_tol=1e-3)
+    assert math.isclose(sizing.true_count(1.0, 1.0, LONG, g), 1.342, abs_tol=1e-3)
 
 
 # ---------------------------------------------------------------- exits

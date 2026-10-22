@@ -9,8 +9,14 @@ from .models import SHORT, Candidate
 
 
 def true_count(stock_z: float, market_z: float, direction: int, gates_cfg) -> float:
-    """True count in the trade's direction (positive = in favour)."""
-    return direction * (gates_cfg.stock_weight * stock_z + gates_cfg.market_weight * market_z)
+    """True count in the trade's direction (positive = in favour), in standard deviations.
+
+    The 2/3 stock + 1/3 market blend is rescaled by sqrt(w_s^2 + w_m^2) so that,
+    like each input, it is measured in standard deviations: thresholds 1/2/3
+    then really mean "1, 2, 3 sigma" instead of being shrunk by the averaging."""
+    ws, wm = gates_cfg.stock_weight, gates_cfg.market_weight
+    norm = math.sqrt(ws * ws + wm * wm) or 1.0
+    return direction * (ws * stock_z + wm * market_z) / norm
 
 
 def gate(tc: float, market_z: float, direction: int, gates_cfg) -> str | None:

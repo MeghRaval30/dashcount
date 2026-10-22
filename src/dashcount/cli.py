@@ -35,7 +35,8 @@ def _setup_logging(name: str, verbose: bool = False) -> None:
     handlers = [logging.StreamHandler(sys.stdout),
                 logging.FileHandler(logs / f"{name}-{dt.date.today().isoformat()}.log", encoding="utf-8")]
     logging.basicConfig(level=logging.DEBUG if verbose else logging.INFO, format=fmt, handlers=handlers, force=True)
-    for noisy in ("httpx", "httpcore", "urllib3", "websockets", "alpaca", "asyncio", "filelock", "huggingface_hub"):
+    for noisy in ("httpx", "httpx2", "httpcore", "urllib3", "websockets", "alpaca", "asyncio", "filelock",
+                  "huggingface_hub", "huggingface_hub.utils._http"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
 
 
@@ -257,6 +258,8 @@ def cmd_arm(args, cfg) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     load_dotenv(ROOT / ".env")
+    os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
+    os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
     p = argparse.ArgumentParser(prog="dashcount", description="Geometry Dash x card counting stock bot")
     p.add_argument("--config", help="override YAML merged over config/default.yaml")
     p.add_argument("--mode", choices=["tournament", "real"], help="risk dial (overrides config)")
@@ -315,7 +318,14 @@ def main(argv: list[str] | None = None) -> int:
     _setup_logging(args.cmd, args.verbose)
     overrides = {"mode": args.mode} if args.mode else None
     cfg = load_config(args.config, overrides)
-    return int(args.fn(args, cfg) or 0)
+    from .data.alpaca_data import MissingKeys
+
+    try:
+        return int(args.fn(args, cfg) or 0)
+    except MissingKeys as e:
+        print()
+        print(e)
+        return 2
 
 
 if __name__ == "__main__":

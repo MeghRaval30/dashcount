@@ -226,8 +226,15 @@ cause, death map, veto scorecards, IEX vs SIP comparison.
 
 Decisions made while building, measured on the RTX 5060 laptop:
 
-* **Count normalisation**: the session EW RMS is *seeded* at
-  κ·sqrt(V·s) (κ = 3) and *floored* at the coin-flip level sqrt(V·s).
+* **Count normalisation**: the session RMS of the 120-s running count is a
+  *bias-corrected* EW mean of squares (half-life 30 min, sampled every 10 s), so
+  it does not depend on a guessed starting value (κ·sqrt(V·s), κ = 3, is used
+  only for the first ~2 minutes), floored at the coin-flip level sqrt(V·s).
+  A seeded estimate suppressed the count for the first hour — exactly the ORB
+  window.
+* **True count scale**: the ⅔ stock + ⅓ market blend is divided by
+  sqrt(w_s² + w_m²) so it stays in standard deviations; without this the
+  thresholds 1/2/3 effectively meant 1.3/2.7/4 σ and "go big" was unreachable.
 * **Kronos**: Kronos-small (≈4.6 s for 30 paths × 30 min; Kronos-base ≈16 s).
   Odds use predicted *closes* only — the model's predicted highs/lows are noisy
   (high < low happens) and would fake touches. Runs are serialised (the model

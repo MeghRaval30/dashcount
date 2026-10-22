@@ -24,9 +24,6 @@ dependencies = [
     "lxml>=5",
 ]
 
-[project.optional-dependencies]
-smoke = ["yfinance>=0.2.50"]
-
 [dependency-groups]
 dev = ["pytest>=8", "pytest-timeout>=2.3"]
 
