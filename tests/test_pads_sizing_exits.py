@@ -10,7 +10,7 @@ from helpers import at, cfg, feed_minutes, session, state
 # ---------------------------------------------------------------- pads
 def _orb_day(breakout_close: float, vol: float):
     c = cfg()
-    st = state(profile_per_5min=50_000)          # 10k/min normal
+    st = state(profile_per_5min=50_000, atr_daily=5.0)   # 10k/min normal
     # 15 bars of range 99..101
     feed_minutes(st, at("09:30"), [(100, 101, 99, 100)] * 15, vol_per_bar=10_000)
     feed_minutes(st, at("09:45"), [(100.5, breakout_close, 100.4, breakout_close)], vol_per_bar=vol)
@@ -70,8 +70,8 @@ def test_bet_spread_buckets_tournament():
     c = cfg()
     m = c.sizing_mode
     for tc, pct in ((1.2, 1.0), (2.5, 2.0), (3.4, 4.0)):
-        d = sizing.size_trade(_cand(), tc, 100_000, 400_000, 0.0, None, m, c.sizing)
-        assert d.risk_pct == pct and d.qty == int(100_000 * pct / 100 / 1.0)
+        d = sizing.size_trade(_cand(stop=98.0), tc, 100_000, 400_000, 0.0, None, m, c.sizing)
+        assert d.risk_pct == pct and d.qty == int(100_000 * pct / 100 / 2.0)
     assert sizing.size_trade(_cand(), 0.5, 100_000, 400_000, 0, None, m, c.sizing).qty == 0
 
 

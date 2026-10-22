@@ -35,8 +35,15 @@ def build(b: dict) -> str:
     closes = b.get("last_closes") or []
     if closes:
         lines.append("LAST 30 MINUTES (1-min closes, oldest to newest): " + " ".join(f"{c * k:.2f}" for c in closes))
+        st = path_stats(closes, b["direction"])
+        lines.append(
+            f"LAST 30 MINUTES SUMMARY: net move {st['net_pct']:+.2f}% ({st['net_with']} the trade), "
+            f"{st['with_steps']} of {st['steps']} one-minute moves went the trade's way, "
+            f"direction changed {st['changes']} times."
+        )
     lines.append(
-        f"MARKET: S&P 500 fund {_pct(b.get('spy_change'))} today, Nasdaq-100 fund {_pct(b.get('qqq_change'))}."
+        f"MARKET: S&P 500 fund {_pct(b.get('spy_change'))} today, Nasdaq-100 fund {_pct(b.get('qqq_change'))} "
+        f"(for this {side_name(b['direction'])} trade, a {'falling' if b['direction'] > 0 else 'rising'} market is the headwind)."
     )
     flags = ", ".join(b.get("flags") or []) or "none"
     lines.append(f"CLOCK: {b['minutes_since_open']:.0f} min since the open, {b['minutes_to_close']:.0f} min to the close. Flags: {flags}.")
@@ -49,11 +56,23 @@ def build(b: dict) -> str:
         lines.append(f"PATTERN MODEL: {b['kronos_odds'] * 100:.0f}% of its simulated paths hit the target before the stop.")
     mem = b.get("memory") or []
     if mem:
-        lines.append("MEMORY (most similar past attempts):")
-        lines += [f"  {i + 1}) {m}" for i, m in enumerate(mem)]
+        w = sum(1 for m in mem if m.get("r", 0) > 0)
+        lo = sum(1 for m in mem if m.get("r", 0) < 0)
+        lines.append(f"MEMORY ({len(mem)} most similar past attempts: {w} won, {lo} lost):")
+        lines += [f"  {i + 1}) {m['text']}" for i, m in enumerate(mem)]
     else:
         lines.append("MEMORY: no similar past attempts yet.")
     return "\n".join(lines)
+
+
+def path_stats(closes: list[float], direction: int) -> dict:
+    moves = [b - a for a, b in zip(closes, closes[1:])]
+    with_steps = sum(1 for m in moves if m * direction > 0)
+    signs = [1 if m > 0 else -1 for m in moves if m != 0]
+    changes = sum(1 for a, b in zip(signs, signs[1:]) if a != b)
+    net = (closes[-1] - closes[0]) / closes[0] * 100 if closes[0] else 0.0
+    return {"net_pct": net, "net_with": "with" if net * direction > 0 else "against",
+            "with_steps": with_steps, "steps": len(moves), "changes": changes}
 
 
 def _f(x) -> str:
