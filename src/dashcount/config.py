@@ -16,7 +16,8 @@ from typing import Literal
 import yaml
 from pydantic import BaseModel, Field
 
-ROOT = Path(__file__).resolve().parents[2]
+# DASHCOUNT_HOME lets a packaged app (DashCount.exe) point at the project folder
+ROOT = Path(os.environ.get("DASHCOUNT_HOME") or Path(__file__).resolve().parents[2])
 DEFAULT_CONFIG = ROOT / "config" / "default.yaml"
 
 

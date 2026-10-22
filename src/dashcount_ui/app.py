@@ -449,6 +449,7 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     root = project_root()
+    os.environ.setdefault("DASHCOUNT_HOME", str(root))        # so bot modules find config/ when packaged
     data = Path(args.data) if args.data else None
     if args.demo:
         from .demo import build_demo

@@ -11,3 +11,8 @@ models/
 logs/
 reports/
 *.gguf
+
+# build outputs
+build/
+dist/
+*.spec
