@@ -1,0 +1,139 @@
+# DashCount settings. Every value here is part of the bot's "version":
+# changing anything gives a new version tag in the flight recorder.
+
+mode: tournament            # tournament | real  (risk dial; NOT the Alpaca account type)
+
+universe:
+  min_price: 10.0
+  min_avg_dollar_volume: 50000000   # 20-day average, USD
+  watchlist_size: 28                # + SPY and QQQ = 30 live symbols (free-plan limit)
+  market_symbols: [SPY, QQQ]
+
+level_map:
+  rank_time: "09:20"                # ET, when the watchlist is chosen
+  data_cutoff: "09:05"              # ET, newest data used (free plan delays SIP by 15 min)
+  earnings_window_days: 1           # remove stocks with earnings within +/- this many trading days
+  earnings_unknown_gap_pct: 4.0     # if the calendar is unavailable, drop |gap| above this
+  observe_only_minutes: 5           # 09:30-09:35 watch only
+  last_entry: "15:45"
+  flatten_at: "15:55"
+  half_day_last_entry: "12:45"
+  half_day_flatten_at: "12:55"
+  release_block_before_min: 2
+  release_block_after_min: 10
+  fomc_block: ["13:55", "15:00"]
+
+features:
+  count_window_s: 120
+  count_sample_every_s: 10
+  count_halflife_min: 30
+  count_prior_kappa: 3.0
+  quote_fresh_s: 5
+  spread_median_window_min: 30
+  atr_1m_period: 14
+  atr_daily_period: 14
+  volume_profile_days: 20
+  feed_share_days: 5
+
+pads:
+  orb:
+    enabled: true
+    range_minutes: 15
+    window: ["09:45", "11:30"]
+    volume_mult: 1.5
+    max_risk_atr_frac: 0.5
+    min_risk_pct: 0.05
+  vwap_pullback:
+    enabled: true
+    window: ["10:00", "15:30"]
+    trend_lookback: 30
+    trend_frac: 0.8
+    high_within_min: 45
+    touch_atr: 0.15
+    stop_atr: 0.5
+    cooldown_min: 20
+  target_r: 2.0
+
+hazards:
+  spread_mult: 2.0
+  spread_max_pct: 0.5
+  dead_volume_mult: 0.5
+  already_ran_atr: 3.0
+  cost_mult: 4.0
+  stale_s_sip: 60
+  stale_s_iex: 180
+  death_cooldown_min: 15
+
+gates:
+  min_true_count: 1.0
+  market_against: -1.5
+  stock_weight: 0.6667
+  market_weight: 0.3333
+
+sizing:
+  tournament:
+    risk_pct: {"1": 1.0, "2": 2.0, "3": 4.0}     # true count >=1, >=2, >=3
+    max_notional_x: 2.0
+    max_open_risk_pct: 6.0
+  real:
+    risk_pct: {"1": 0.25, "2": 0.375, "3": 0.5}
+    max_notional_x: 1.0
+    max_open_risk_pct: 1.5
+  liquidity_frac_of_5min: 0.05
+  short_buying_power_markup: 1.03
+
+veto:
+  kronos:
+    enabled: true
+    model: NeoQuasar/Kronos-small
+    tokenizer: NeoQuasar/Kronos-Tokenizer-base
+    max_context: 512
+    context_bars: 400
+    horizon_min: 30
+    samples: 30
+    min_odds: 0.40
+    min_decided: 6
+    timeout_s: 10
+    temperature: 1.0
+    top_p: 0.9
+    judge_from: "2024-07-01"
+  finr1:
+    enabled: true
+    model: hf.co/bartowski/SUFE-AIFLM-Lab_Fin-R1-GGUF:Q4_K_M
+    ollama_url: http://127.0.0.1:11434
+    timeout_s: 20
+    max_tokens: 700
+    memory_k: 5
+  missed_jump_r: 0.25
+  coward_veto_rate: 0.60
+  min_vetoes_to_judge: 50
+
+execution:
+  entry_limit_r: 0.05
+  entry_timeout_s: 30
+  flip_true_count: -1.0
+  flip_hold_s: 30
+  stale_after_min: 30
+  stale_min_mfe_r: 0.5
+  checkpoint_r: 1.0
+
+guardian:
+  tournament: {daily_loss_pct: 8.0, losers_in_row: 4, drawdown_pct: 25.0}
+  real: {daily_loss_pct: 2.0, losers_in_row: 3, drawdown_pct: 10.0}
+  heartbeat_timeout_s: 60
+  unknown_position_grace_s: 30
+  poll_s: 5
+
+simulator:
+  latency_ms: 300
+  base_slippage_bps: 2.0
+  impact_bps: 10.0
+  max_slippage_bps: 50.0
+  sec_fee_per_million: 27.80
+  taf_per_share: 0.000166
+  taf_cap: 8.30
+  starting_equity: 100000.0
+
+practice:
+  train: ["2024-07-01", "2025-12-31"]
+  test: ["2026-01-01", "2026-09-30"]

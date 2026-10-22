@@ -1,0 +1,13 @@
+# secrets
+.env
+# python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+# data, models, runtime state
+data/
+models/
+logs/
+reports/
+*.gguf
