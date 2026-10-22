@@ -15,7 +15,7 @@ import httpx
 from . import notify
 from .config import Config
 from .data.alpaca_data import keys_from_env
-from .data.alpaca_trading import is_paper, trading_client
+from .data.alpaca_trading import g, is_paper, trading_client
 from .guardian import Action, GuardianRules, GuardianState, round_trips
 from .models import Account
 from .state import Capital, bot_positions_path, capital_path, guardian_path, heartbeat_age, read_json
@@ -76,10 +76,11 @@ def run_guardian(cfg: Config, once: bool = False) -> None:
                 time.sleep(30)
                 continue
             acct = tc.get_account()
-            view = capital.view(Account(float(acct.equity), float(acct.buying_power or 0), float(acct.last_equity or 0)))
+            view = capital.view(Account(float(g(acct, "equity")), float(g(acct, "buying_power") or 0),
+                                        float(g(acct, "last_equity") or 0)))
             equity = view.equity
             rules.new_day(today.isoformat(), view.last_equity or equity)
-            positions = {p.symbol: p for p in tc.get_all_positions()}
+            positions = {g(p, "symbol"): p for p in tc.get_all_positions()}
             exposure = bool(positions)
             actions = rules.evaluate(now, equity, flatten_at, exposure)
 

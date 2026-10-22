@@ -13,7 +13,7 @@ import time
 from typing import Callable
 
 from ..data.alpaca_data import keys_from_env
-from ..data.alpaca_trading import is_paper
+from ..data.alpaca_trading import g, is_paper, ts_of
 from ..models import LONG, Account, OrderUpdate, Position
 from . import round_price
 
@@ -33,7 +33,8 @@ class AlpacaBroker:
 
         self.paper = is_paper() if paper is None else paper
         k, s = keys_from_env()
-        self.client = client or TradingClient(k, s, paper=self.paper)
+        # raw_data: plain dicts, immune to new enum values Alpaca adds
+        self.client = client or TradingClient(k, s, paper=self.paper, raw_data=True)
         self._listener: Callable[[OrderUpdate], None] | None = None
         self.post: Callable[[Callable[[], None]], None] = lambda fn: fn()
         self.roles: dict[str, str] = {}
@@ -46,7 +47,7 @@ class AlpacaBroker:
     def _start_stream(self, k: str, s: str) -> None:
         from alpaca.trading.stream import TradingStream
 
-        self._stream = TradingStream(k, s, paper=self.paper)
+        self._stream = TradingStream(k, s, paper=self.paper, raw_data=True)
         self._stream.subscribe_trade_updates(self._on_stream)
         self._thread = threading.Thread(target=self._run_stream, name="alpaca-orders", daemon=True)
         self._thread.start()
@@ -69,26 +70,30 @@ class AlpacaBroker:
             self.post(lambda: self._listener(u))
 
     def _to_update(self, data) -> OrderUpdate | None:
-        o = data.order
-        oid = str(o.id)
-        ev = str(getattr(data.event, "value", data.event))
+        o = g(data, "order")
+        oid = str(g(o, "id"))
+        ev = g(data, "event")
+        ev = str(getattr(ev, "value", ev))
         mapping = {"new": "new", "fill": "fill", "partial_fill": "partial_fill", "canceled": "canceled",
                    "expired": "expired", "rejected": "rejected", "replaced": "replaced", "done_for_day": "expired"}
         if ev not in mapping:
             return None
         role = self.roles.get(oid) or self._infer_role(o)
-        side = str(getattr(o.side, "value", o.side))
-        ts = data.timestamp.timestamp() if getattr(data, "timestamp", None) else time.time()
+        side = g(o, "side")
+        side = str(getattr(side, "value", side))
+        ts = ts_of(g(data, "timestamp")) or time.time()
+        filled = ev in ("fill", "partial_fill")
         return OrderUpdate(
-            order_id=oid, symbol=o.symbol, event=mapping[ev], role=role, side=side,
-            filled_qty=_f(o.filled_qty), filled_avg_price=_f(o.filled_avg_price), ts=ts,
-            last_fill_qty=_f(getattr(data, "qty", 0)) if ev in ("fill", "partial_fill") else 0.0,
-            last_fill_price=_f(getattr(data, "price", 0)) if ev in ("fill", "partial_fill") else 0.0,
-            client_order_id=o.client_order_id or "",
+            order_id=oid, symbol=g(o, "symbol"), event=mapping[ev], role=role, side=side,
+            filled_qty=_f(g(o, "filled_qty")), filled_avg_price=_f(g(o, "filled_avg_price")), ts=ts,
+            last_fill_qty=_f(g(data, "qty", 0)) if filled else 0.0,
+            last_fill_price=_f(g(data, "price", 0)) if filled else 0.0,
+            client_order_id=g(o, "client_order_id") or "",
         )
 
     def _infer_role(self, o) -> str:
-        t = str(getattr(o.order_type, "value", o.order_type) or getattr(o.type, "value", o.type))
+        t = g(o, "order_type") or g(o, "type")
+        t = str(getattr(t, "value", t))
         if t in ("stop", "stop_limit", "trailing_stop"):
             return "stop"
         if t == "limit":
@@ -101,17 +106,19 @@ class AlpacaBroker:
 
     def account(self) -> Account:
         a = self.client.get_account()
-        bp = _f(a.daytrading_buying_power) or _f(a.buying_power)
-        return Account(equity=_f(a.equity), buying_power=bp, last_equity=_f(a.last_equity))
+        bp = _f(g(a, "daytrading_buying_power")) or _f(g(a, "buying_power"))
+        return Account(equity=_f(g(a, "equity")), buying_power=bp, last_equity=_f(g(a, "last_equity")))
 
     def positions(self) -> dict[str, Position]:
         out = {}
         for p in self.client.get_all_positions():
-            q = _f(p.qty)
-            side = str(getattr(p.side, "value", p.side))
+            q = _f(g(p, "qty"))
+            side = g(p, "side")
+            side = str(getattr(side, "value", side))
             if side == "short" and q > 0:
                 q = -q
-            out[p.symbol] = Position(p.symbol, q, _f(p.avg_entry_price))
+            sym = g(p, "symbol")
+            out[sym] = Position(sym, q, _f(g(p, "avg_entry_price")))
         return out
 
     def submit_entry(self, symbol, direction, qty, limit_price, take_profit, stop, client_id) -> str:
@@ -127,10 +134,10 @@ class AlpacaBroker:
             client_order_id=client_id,
         )
         o = self.client.submit_order(req)
-        self.roles[str(o.id)] = "entry"
-        for leg in (o.legs or []):
-            self.roles[str(leg.id)] = self._infer_role(leg)
-        return str(o.id)
+        self.roles[str(g(o, "id"))] = "entry"
+        for leg in (g(o, "legs") or []):
+            self.roles[str(g(leg, "id"))] = self._infer_role(leg)
+        return str(g(o, "id"))
 
     def cancel(self, order_id: str) -> None:
         try:
@@ -147,9 +154,9 @@ class AlpacaBroker:
     def _cancel_symbol_orders(self, symbol: str, wait_s: float = 4.0) -> None:
         ids = []
         for o in self._open_orders(symbol):
-            ids.append(str(o.id))
-            for leg in (o.legs or []):
-                ids.append(str(leg.id))
+            ids.append(str(g(o, "id")))
+            for leg in (g(o, "legs") or []):
+                ids.append(str(g(leg, "id")))
         for oid in ids:
             self.cancel(oid)
         deadline = time.time() + wait_s
@@ -172,24 +179,24 @@ class AlpacaBroker:
             stop_loss=StopLossRequest(stop_price=round_price(stop)),
         )
         o = self.client.submit_order(req)
-        self.roles[str(o.id)] = "take_profit"
-        for leg in (o.legs or []):
-            self.roles[str(leg.id)] = self._infer_role(leg)
+        self.roles[str(g(o, "id"))] = "take_profit"
+        for leg in (g(o, "legs") or []):
+            self.roles[str(g(leg, "id"))] = self._infer_role(leg)
 
     def close_position(self, symbol: str) -> None:
         self._cancel_symbol_orders(symbol)
         try:
             o = self.client.close_position(symbol)
-            if hasattr(o, "id"):
-                self.roles[str(o.id)] = "exit"
+            if g(o, "id"):
+                self.roles[str(g(o, "id"))] = "exit"
         except Exception as e:
             log.info("close_position %s: %s", symbol, e)
 
     def close_all(self) -> None:
         try:
             for r in self.client.close_all_positions(cancel_orders=True) or []:
-                body = getattr(r, "body", None)
-                if body is not None and hasattr(body, "id"):
-                    self.roles[str(body.id)] = "exit"
+                body = g(r, "body")
+                if g(body, "id"):
+                    self.roles[str(g(body, "id"))] = "exit"
         except Exception as e:
             log.warning("close_all: %s", e)

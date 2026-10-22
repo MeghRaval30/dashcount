@@ -95,11 +95,16 @@ def cmd_check(args, cfg) -> int:
     line(have_keys, "Alpaca keys in .env", "" if have_keys else "copy .env.example to .env and paste your PAPER keys")
     if have_keys:
         try:
-            from .data.alpaca_trading import is_paper, trading_client
+            from .data.alpaca_trading import g, is_paper, trading_client
 
             a = trading_client().get_account()
-            line(True, f"Alpaca {'paper' if is_paper() else 'REAL'} account", f"equity ${float(a.equity):,.2f}, shorting {'on' if a.shorting_enabled else 'OFF'}")
-            line(float(a.equity) >= 25000 or is_paper(), "Pattern-day-trader room", "" if float(a.equity) >= 25000 else "under $25k: day trades may be limited")
+            eq = float(g(a, "equity"))
+            kind = "paper" if is_paper() else "REAL"
+            short = "on" if g(a, "shorting_enabled") else "OFF"
+            line(True, f"Alpaca {kind} account", f"equity ${eq:,.2f}, shorting {short}")
+            line(eq >= 25000, "Pattern-day-trader room", "" if eq >= 25000 else "account under $25k: day trades may be limited")
+            cap = cfg.account.capital
+            line(True, "Trading budget", f"${cap:,.0f} of the account" if cap else "whole account")
         except Exception as e:
             line(False, "Alpaca trading API", str(e)[:200])
         try:
