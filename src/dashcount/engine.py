@@ -41,6 +41,7 @@ class Ghost:
     vetoed_by: str
     track: exits.Track
     features: dict
+    cost_r: float = 0.0        # estimated round-trip cost in R: a ghost never paid it
 
 
 def friendly_action(action: str) -> str:
@@ -308,8 +309,10 @@ class Engine:
         atr1 = st.bars.atr
         vwap = st.bars.vwap
         price = st.last_price or c.entry
+        stock_z_alt = st.z_alt(self.now)
         f = {
             "tc": tc, "stock_z": stock_z, "market_z": mz,
+            "stock_z_alt": stock_z_alt, "tc_alt": sizing.true_count(stock_z_alt, mz, c.direction, self.cfg.gates),
             "stock_z_dir": c.direction * stock_z, "market_z_dir": c.direction * mz,
             "imbalance": st.spread.imbalance() * c.direction,
             "rel_volume_5m": vals.get("rel_volume_5m"),
@@ -451,17 +454,17 @@ class Engine:
         base.setdefault("decided_ts", self.now)
         self.rec.add("attempts", base)
         tr = exits.Track(c.direction, c.entry, c.stop, c.target, c.risk, opened_ts=self.now)
-        self.ghosts.setdefault(c.symbol, []).append(Ghost(c, action, vetoed_by, tr, f))
+        ttc = f.get("target_to_cost")
+        cost_r = abs(c.target - c.entry) / ttc / c.risk if (ttc and c.risk) else 0.0
+        self.ghosts.setdefault(c.symbol, []).append(Ghost(c, action, vetoed_by, tr, f, cost_r))
 
     # ------------------------------------------------------------ ghosts
     def _update_ghost(self, g: Ghost, price: float) -> None:
         tr = g.track
         exits.update_excursions(tr, price)
-        hit = exits.touched(tr, price)
+        hit = exits.ghost_exit(tr, price)
         if hit:
-            reason = "target" if hit == "target" else ("checkpoint_stop" if tr.checkpoint_done else "stop")
-            exit_price = tr.target if hit == "target" else tr.stop
-            return self._resolve_ghost(g, reason, exit_price)
+            return self._resolve_ghost(g, *hit)
         if exits.checkpoint_due(tr, price, self.cfg.execution.checkpoint_r):
             exits.apply_checkpoint(tr)
         reason = exits.soft_exit(tr, self.now, self.tc_dir(g.cand.symbol, tr.direction), self.plan.flatten_at,
@@ -474,14 +477,16 @@ class Engine:
         if g in lst:
             lst.remove(g)
         r = g.track.r(exit_price)
+        r_net = r - g.cost_r
         self.rec.add("outcomes", {
             "attempt_id": g.cand.attempt_id, "is_ghost": True, "action": g.action, "exit_reason": reason,
-            "r": r, "mfe_r": g.track.mfe_r, "mae_r": g.track.mae_r, "hold_s": self.now - g.track.opened_ts,
-            "exit_price": exit_price, "resolved_ts": self.now,
+            "r": r, "r_net": r_net, "mfe_r": g.track.mfe_r, "mae_r": g.track.mae_r,
+            "hold_s": self.now - g.track.opened_ts, "exit_price": exit_price, "resolved_ts": self.now,
         })
+        # vetoes and memory are judged on what the setup would really have made
         if g.vetoed_by:
-            self.veto_score.add_resolved_veto(g.vetoed_by, r)
-        self.memory.add(MemoryItem(g.cand.pad, g.cand.direction, g.features, self.now, r, reason, True, g.action))
+            self.veto_score.add_resolved_veto(g.vetoed_by, r_net)
+        self.memory.add(MemoryItem(g.cand.pad, g.cand.direction, g.features, self.now, r_net, reason, True, g.action))
 
     # ------------------------------------------------------- real trades
     def _on_trade_closed(self, t: LiveTrade) -> None:

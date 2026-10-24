@@ -31,12 +31,24 @@ def update_excursions(t: Track, price: float) -> None:
 
 
 def touched(t: Track, price: float) -> str | None:
-    """Did this print touch the stop or the target? (ghosts / simulator)."""
+    """Did this print hit the stop, or trade through the target? Like the broker: a
+    resting take-profit limit only fills when the price trades *through* it."""
     if (price - t.stop) * t.direction <= 0:
         return "stop"
-    if (price - t.target) * t.direction >= 0:
+    if (price - t.target) * t.direction > 0:
         return "target"
     return None
+
+
+def ghost_exit(t: Track, price: float) -> tuple[str, float] | None:
+    """A ghost's broker-side exit at this print, as (reason, fill price): the target
+    fills at its limit, a stop at the print that hit it (worse than the stop in a gap)."""
+    hit = touched(t, price)
+    if hit is None:
+        return None
+    if hit == "target":
+        return "target", t.target
+    return ("checkpoint_stop" if t.checkpoint_done else "stop"), price
 
 
 def checkpoint_due(t: Track, price: float, checkpoint_r: float) -> bool:

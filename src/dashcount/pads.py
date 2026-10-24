@@ -45,15 +45,15 @@ def orb(state: SymbolState, bar: Bar, session: Session, cfg, target_r: float) ->
     for direction, broke in ((LONG, bar.close > hi), (SHORT, bar.close < lo)):
         if not broke or direction in ps["done"]:
             continue
-        ps["done"].add(direction)
         risk = abs(bar.close - mid)
         atr_d = state.item.atr_daily
         if atr_d > 0 and risk > cfg.max_risk_atr_frac * atr_d:
-            continue
+            continue               # too far from the range: a later re-break may still qualify
         if risk < cfg.min_risk_pct / 100.0 * bar.close:
             continue
         c = _make(state, bar.end, "orb", direction, bar.close, mid, target_r)
         if c:
+            ps["done"].add(direction)
             out.append(c)
     return out
 

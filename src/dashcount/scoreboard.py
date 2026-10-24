@@ -56,7 +56,10 @@ def summarize(run_dir: Path) -> dict:
         s["actions"] = att["action"].map(lambda a: str(a).split(":")[0] + (":" + str(a).split(":")[1] if ":" in str(a) else "")).value_counts().to_dict()
         s["hazards_fired"] = pd.Series([h for hs in att["hazards"].dropna() for h in json.loads(hs)]).value_counts().to_dict() if "hazards" in att else {}
     if len(att) and len(out):
-        j = att.merge(out[["attempt_id", "r", "is_ghost", "exit_reason"]].rename(columns={"exit_reason": "exit"}), on="attempt_id")
+        o = out.copy()
+        if "r_net" in o:                  # ghosts never paid costs: score them after estimated costs
+            o["r"] = o["r_net"].where(o["is_ghost"] == True, o["r"])  # noqa: E712
+        j = att.merge(o[["attempt_id", "r", "is_ghost", "exit_reason"]].rename(columns={"exit_reason": "exit"}), on="attempt_id")
         j["count_bucket"] = j["tc"].map(_bucket)
         j["hour"] = j["time_et"].str.slice(11, 13)
         s["by_count_bucket"] = j.groupby("count_bucket").agg(n=("r", "size"), avg_r=("r", "mean"), win=("r", lambda x: float((x > 0).mean()))).round(3).reset_index().to_dict("records")

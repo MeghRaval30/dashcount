@@ -35,6 +35,23 @@ def test_orb_needs_volume_and_fires_once():
     assert orb(st, st.bars.bars[-1], session(), cfg().pads.orb, 2.0) == []
 
 
+def test_orb_too_wide_first_break_does_not_use_up_the_day():
+    c = cfg()
+    cands, st = _orb_day(103.0, vol=20_000)        # risk 3.0 > 0.5 x daily ATR (2.5): skipped
+    assert cands == []
+    feed_minutes(st, at("09:46"), [(102, 102, 100.4, 100.5)], vol_per_bar=20_000)    # back inside the range
+    feed_minutes(st, at("09:47"), [(100.5, 101.5, 100.4, 101.5)], vol_per_bar=20_000)
+    cands = orb(st, st.bars.bars[-1], session(), c.pads.orb, c.pads.target_r)
+    assert [x.direction for x in cands] == [LONG] and cands[0].stop == 100.0
+
+
+def test_ghost_exits_fill_like_the_broker():
+    t = exits.Track(LONG, 100.0, 99.0, 102.0, 1.0, opened_ts=0.0)
+    assert exits.ghost_exit(t, 102.0) is None                   # touching the target: limit not filled
+    assert exits.ghost_exit(t, 102.05) == ("target", 102.0)     # trading through: filled at the limit
+    assert exits.ghost_exit(t, 98.4) == ("stop", 98.4)          # gapping through the stop: filled at the print
+
+
 def test_vwap_pullback_long():
     c = cfg()
     st = state()
@@ -111,7 +128,9 @@ def test_checkpoint_and_soft_exits():
     assert exits.checkpoint_due(t, 101.0, ec.checkpoint_r)
     exits.apply_checkpoint(t)
     assert t.stop == 100.0 and not exits.checkpoint_due(t, 101.5, ec.checkpoint_r)
-    assert exits.touched(t, 100.0) == "stop" and exits.touched(t, 102.0) == "target"
+    assert exits.touched(t, 100.0) == "stop"
+    # like the broker's take-profit limit: touching the target is not enough, trading through is
+    assert exits.touched(t, 102.0) is None and exits.touched(t, 102.01) == "target"
     # count flip must persist for 30 s
     assert exits.soft_exit(t, 10.0, -1.5, 1e9, ec) is None
     assert exits.soft_exit(t, 41.0, -1.5, 1e9, ec) == "count_flip"

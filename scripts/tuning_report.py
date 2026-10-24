@@ -33,12 +33,14 @@ TARGET_R = 2.0
 def load(run_dir: Path) -> pd.DataFrame:
     att = read_table(run_dir, "attempts")
     out = read_table(run_dir, "outcomes")
-    j = att.merge(out[["attempt_id", "is_ghost", "exit_reason", "r", "mfe_r", "mae_r"]], on="attempt_id", how="left")
+    keep = ["attempt_id", "is_ghost", "exit_reason", "r", "mfe_r", "mae_r"] + (["r_net"] if "r_net" in out else [])
+    j = att.merge(out[keep], on="attempt_id", how="left")
     j["hazard_list"] = j["hazards"].map(lambda h: json.loads(h) if isinstance(h, str) and h else [])
     ttc = pd.to_numeric(j["target_to_cost"], errors="coerce")
     j["cost_r"] = np.where(ttc > 0, TARGET_R / ttc, np.nan)
-    # real trades already paid costs in their fills; ghosts did not
-    j["net_r"] = np.where(j["is_ghost"] == True, j["r"] - j["cost_r"].fillna(0.0), j["r"])  # noqa: E712
+    # real trades already paid costs in their fills; ghosts did not (newer runs record r_net)
+    net = j["r_net"] if "r_net" in j else j["r"] - j["cost_r"].fillna(0.0)
+    j["net_r"] = np.where(j["is_ghost"] == True, net, j["r"])  # noqa: E712
     j["stage"] = j["action"].map(lambda a: str(a).split(":")[0])
     j["bet_mult"] = np.select([j["tc"] >= 3, j["tc"] >= 2, j["tc"] >= 1], [4.0, 2.0, 1.0], 1.0)
     return j
@@ -110,6 +112,11 @@ def main() -> None:
                    "What if gates.min_true_count = threshold (hazard-free setups, vetoes ignored)"))
     for pad, g in clean.groupby("pad"):
         L.append(table(by_bins(g, "tc", edges, labels), f"  ... pad {pad}"))
+    if "tc_alt" in clean and clean["tc_alt"].notna().any():
+        L.append(table(by_bins(clean, "tc_alt", edges, labels),
+                       "The other signing rule's count (tc_alt, recorded only) vs result"))
+        L.append(table(what_if(clean, "tc_alt", [0.0, 0.5, 1.0, 1.5, 2.0], lambda c, t: c >= t, split),
+                       "What if the gate used tc_alt instead"))
 
     # --- Kronos ---------------------------------------------------------------
     kr = j[j["kronos_odds"].notna()]

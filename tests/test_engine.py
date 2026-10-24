@@ -71,6 +71,19 @@ def test_veto_everything_means_no_trades_but_ghosts(market, tmp_path, any_count)
     assert set(vc["verdict"]) == {"veto"}
 
 
+def test_ghosts_pay_costs_and_veto_score_uses_net_r(market, tmp_path, any_count):
+    c = cfg()
+    chain = VetoChain(c.veto, VetoAll(), None, None)
+    eng, b, run = _run(market, tmp_path, chain=chain, pads={"target_r": 2.0},
+                       gates={"min_true_count": -99.0, "market_against": -99.0},
+                       hazards={"cost_mult": 0.0})
+    out = read_table(run, "outcomes")
+    ghosts = out[out["is_ghost"] == True]  # noqa: E712
+    assert len(ghosts) and (ghosts["r_net"] < ghosts["r"]).all()
+    vetoed = ghosts[ghosts["action"] == "vetoed:kronos"]
+    assert len(vetoed) and eng.veto_score.d["kronos"]["saved_r"] == pytest.approx(-vetoed["r_net"].sum())
+
+
 def test_loose_gates_trade_and_record(market, tmp_path, any_count):
     eng, b, run = _run(market, tmp_path, gates={"min_true_count": -99.0, "market_against": -99.0},
                        hazards={"cost_mult": 0.0})
