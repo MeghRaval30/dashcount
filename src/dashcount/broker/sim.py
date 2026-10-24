@@ -149,15 +149,23 @@ class SimBroker:
 
     def _quote(self, symbol: str) -> Quote | None:
         """Latest fresh quote, narrowed to the estimated NBBO when the feed's book
-        is only an upper bound (IEX): the real best prices are never worse."""
+        is only an upper bound (IEX): the real best prices are never worse.
+
+        IEX's book is often lopsided (bid 889.79 / ask 932.81 while the stock prints
+        890), so its midpoint can sit dollars away from the market. The NBBO estimate
+        is centred on the last print instead, kept inside the feed's book."""
         q = self.quotes.get(symbol)
         if not (q and q.bid > 0 and q.ask >= q.bid and self.now - q.ts <= 5):
             return None
         bps = self.spread_bps_fn(symbol)
         if bps:
-            mid = (q.bid + q.ask) / 2
-            half = min((q.ask - q.bid) / 2, max(0.005, mid * bps / 2e4))
-            return Quote(q.symbol, q.ts, mid - half, mid + half, q.bid_size, q.ask_size)
+            mark = self.marks.get(symbol)
+            centre = mark if mark else (q.bid + q.ask) / 2
+            half = max(0.005, centre * bps / 2e4)
+            if q.ask - q.bid <= 2 * half:
+                return q
+            centre = min(max(centre, q.bid + half), q.ask - half)
+            return Quote(q.symbol, q.ts, centre - half, centre + half, q.bid_size, q.ask_size)
         return q
 
     def _on_activate(self, o: SimOrder) -> None:

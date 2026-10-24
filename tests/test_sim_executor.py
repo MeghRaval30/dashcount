@@ -118,3 +118,33 @@ def test_sim_fills_against_nbbo_estimate_on_iex():
     b.on_trade(trade(t0 + 1, 100.0))
     tr = ex.trades[ex.by_symbol["TEST"]]
     assert tr.state == "open" and tr.avg_entry < 100.1      # not filled at IEX's 101 ask
+
+
+def test_lopsided_iex_book_entry_fills_near_the_last_print():
+    # real case (SNDK 2026-10-15): IEX book 1305.00 / 1326.93 (mid 1316), stock printing 1326.75
+    c, b, ex, closed = _setup()
+    b.spread_bps_fn = lambda s: 4.0
+    t0 = at("10:00")
+    b.on_trade(trade(t0, 1326.75))
+    b.on_quote(quote(t0, 1305.00, 1326.93))
+    ex.enter(Candidate("TEST", t0, "orb", LONG, 1327.28, 1300.33, 1381.19), 4, t0)
+    b.on_trade(trade(t0 + 1, 1326.75))
+    tr = ex.trades[ex.by_symbol["TEST"]]
+    assert tr.state == "open" and 1326.5 < tr.avg_entry <= 1328.63     # not at the 1316 IEX midpoint
+
+
+def test_lopsided_iex_book_exit_is_not_a_phantom_profit():
+    # real case (MU 2026-10-15): IEX book 889.79 / 932.81 (mid 911), stock printing 890
+    c, b, ex, closed = _setup()
+    b.spread_bps_fn = lambda s: 3.0
+    t0 = at("10:00")
+    _tick(b, ex, t0, 880.0)
+    ex.enter(Candidate("TEST", t0, "orb", LONG, 880.0, 868.0, 904.0), 8, t0)
+    _tick(b, ex, t0 + 1, 880.0)
+    assert ex.trades[ex.by_symbol["TEST"]].state == "open"
+    b.on_trade(trade(t0 + 10, 890.0))
+    b.on_quote(quote(t0 + 10, 889.79, 932.81))
+    b.close_position("TEST")
+    b.on_trade(trade(t0 + 11, 890.0))
+    exit_fill = [o for o in b.orders.values() if o.role == "exit"][0]
+    assert exit_fill.status == "filled" and exit_fill.avg_price <= 890.0
