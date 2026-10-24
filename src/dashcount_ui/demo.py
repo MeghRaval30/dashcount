@@ -81,6 +81,7 @@ def build_demo(folder: str | Path | None = None, morning_until: str = "11:20") -
         snap = eng.snapshot({"account": "paper demo", "events": {"trade": n_tr // 3, "quote": n_tr},
                              "removed_earnings": []})
         write_json(st_dir / "live_snapshot.json", snap)
+        write_json(st_dir / "live_bars.json", eng.bars_snapshot())
         write_json(st_dir / "heartbeat.json", {"ts": __import__("time").time(), "status": "trading"})
         guardian.s.save(st_dir / "guardian.json")
     return folder

@@ -36,6 +36,10 @@ def snapshot_path() -> Path:
     return state_dir() / "live_snapshot.json"
 
 
+def bars_path() -> Path:
+    return state_dir() / "live_bars.json"
+
+
 def stop_path() -> Path:
     return state_dir() / "stop.flag"
 

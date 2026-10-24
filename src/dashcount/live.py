@@ -28,7 +28,7 @@ from .levelmap import LevelMap
 from .models import Quote, Trade
 from .recorder import Recorder
 from .scoreboard import console, write_report
-from .state import (Capital, beat, bot_positions_path, capital_path, guardian_path, journal_path, read_json,
+from .state import (Capital, bars_path, beat, bot_positions_path, capital_path, guardian_path, journal_path, read_json,
                     snapshot_path, stop_path, veto_score_path, write_json)
 from .timeutil import ET, calendar, et_ts, fmt_et
 
@@ -156,7 +156,7 @@ def run_live(cfg: Config, real_money: bool = False, vetoes: str = "full", day: d
     feed.start()
     notify.send(f"Live on {len(plan.symbols)} symbols: {', '.join(s for s in plan.symbols if s not in cfg.universe.market_symbols)}")
 
-    last_beat = last_flush = last_status = last_snap = 0.0
+    last_beat = last_flush = last_status = last_snap = last_bars = 0.0
     stop_path().unlink(missing_ok=True)
     journal({"ts": time.time(), "kind": "status", "symbol": "",
              "text": f"live on {len(plan.symbols)} symbols, budget ${cfg.account.capital or 0:,.0f}"})
@@ -206,6 +206,9 @@ def run_live(cfg: Config, real_money: bool = False, vetoes: str = "full", day: d
                 safely(lambda: write_json(snapshot_path(), engine.snapshot(
                     {"account": acct_kind, "events": dict(n_events), "watchlist_ranking": plan.ranking[:20],
                      "removed_earnings": plan.removed_earnings})))
+            if now - last_bars >= 15:
+                last_bars = now
+                safely(lambda: write_json(bars_path(), engine.bars_snapshot()))
             if stop_path().exists():
                 log.warning("stop requested from the dashboard: flattening and ending the day")
                 journal({"ts": now, "kind": "status", "symbol": "", "text": "STOP pressed: closing everything"})
@@ -240,6 +243,7 @@ def run_live(cfg: Config, real_money: bool = False, vetoes: str = "full", day: d
         rec.flush(day_s)
         try:
             write_json(snapshot_path(), engine.snapshot({"account": acct_kind, "events": dict(n_events), "finished": True}))
+            write_json(bars_path(), engine.bars_snapshot())
         except Exception:
             log.exception("final snapshot failed")
         write_json(veto_score_path(), score.d)

@@ -42,6 +42,8 @@ class DataSource:
         self.state = self.data / "state"
         self._snap = None
         self._snap_mtime = 0.0
+        self._bars = None
+        self._bars_mtime = 0.0
         self._jfile: Path | None = None
         self._joff = 0
 
@@ -57,6 +59,19 @@ class DataSource:
             if s is not None:                    # keep the last good one on a partial write
                 self._snap, self._snap_mtime = s, m
         return self._snap
+
+    def bars(self) -> dict | None:
+        """Today's minute bars per symbol (written by the bot every ~15 s)."""
+        p = self.state / "live_bars.json"
+        try:
+            m = p.stat().st_mtime
+        except OSError:
+            return self._bars
+        if m != self._bars_mtime:
+            b = _read_json(p)
+            if b is not None:
+                self._bars, self._bars_mtime = b, m
+        return self._bars
 
     def snapshot_age(self) -> float | None:
         return time.time() - self._snap_mtime if self._snap_mtime else None

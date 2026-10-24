@@ -629,6 +629,20 @@ class Engine:
             "veto_score": self.veto_score.d, **(extra or {}),
         }
 
+    def bars_snapshot(self) -> dict:
+        """Today's 1-minute bars + VWAP per symbol, for the dashboard's price charts."""
+        out = {}
+        for sym, st in self.states.items():
+            bs = st.bars.bars
+            out[sym] = {
+                "prev_close": st.item.prev_close,
+                "bars": [[b.start, round(b.open, 4), round(b.high, 4), round(b.low, 4), round(b.close, 4), b.volume]
+                         for b in bs],
+                "vwap": [round(v, 4) for v in st.bars.vwaps],
+            }
+        return {"ts": self.now, "day": self.session.day.isoformat(), "open": self.session.open,
+                "close": self.session.close, "symbols": out}
+
     # --------------------------------------------------------------- end
     def finish(self) -> dict:
         """Close the day: resolve remaining ghosts, write the daily row."""

@@ -33,6 +33,8 @@ def test_datasource_reads_demo(demo_dir):
     j = ds.journal_new()
     assert j and {"ts", "kind", "text"} <= set(j[0])
     assert ds.journal_new() == []                    # incremental
+    b = ds.bars()
+    assert b and len(b["symbols"]) == 16 and b["symbols"]["IRON"]["bars"]
     h = ds.history()
     assert len(h["days"]) == 2 and "error" not in h
 
@@ -67,6 +69,10 @@ def test_window_renders(demo_dir, tmp_path):
     assert w.header.chips and any(k == "eq" for k, *_ in w.header.chips)
     w.toggle_map()
     w.toggle_map()
+    assert w.chart.symbol and w.chart.data.get("bars")         # a default stock is charted
+    other = [r["symbol"] for r in w.level.rows if r["symbol"] != w.chart.symbol][0]
+    w.select_symbol(other)
+    assert w.chart.symbol == other and w.chart.data.get("bars")
     w.start_day()                                     # demo mode: refuses, shows a toast
     assert "Demo" in w.footer.toast
     w.close()

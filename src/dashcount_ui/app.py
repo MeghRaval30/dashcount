@@ -23,7 +23,7 @@ from . import pixel as px
 from .datasource import DataSource, project_root
 from .sound import Sounds
 from .widgets import (Footer, Header, HotbarButton, InventoryView, JournalView, LevelView, ParchmentPanel,
-                      PixelPanel, ScoreView, TreasureMap, countdown, money)
+                      PixelPanel, PriceChart, ScoreView, TreasureMap, countdown, money)
 
 ET = ZoneInfo("America/New_York")
 IST = ZoneInfo("Asia/Kolkata")
@@ -96,8 +96,9 @@ class MainWindow(QWidget):
 
         self.setWindowTitle("DashCount - the treasure hunter's trading table" + ("  [DEMO DATA]" if demo else ""))
         self.setWindowIcon(px.app_icon())
-        self.resize(1360, 860)
-        self.setMinimumSize(1120, 720)
+        self.resize(1440, 900)
+        self.setMinimumSize(1200, 760)
+        self.selected: str | None = None
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -108,11 +109,19 @@ class MainWindow(QWidget):
 
         stone = Stone()
         outer.addWidget(stone, 1)
-        grid = QHBoxLayout(stone)
-        grid.setContentsMargins(10, 10, 10, 6)
-        grid.setSpacing(10)
+        rows = QVBoxLayout(stone)
+        rows.setContentsMargins(10, 10, 10, 6)
+        rows.setSpacing(10)
+        top = QHBoxLayout()
+        top.setSpacing(10)
+        bottom = QHBoxLayout()
+        bottom.setSpacing(10)
+        rows.addLayout(top, 11)
+        rows.addLayout(bottom, 7)
 
+        # top row: the level | price chart | journal
         self.level = LevelView()
+        self.level.symbol_clicked.connect(self.select_symbol)
         lp = PixelPanel("THE LEVEL", "spike")
         sa = QScrollArea()
         sa.setWidgetResizable(True)
@@ -120,31 +129,30 @@ class MainWindow(QWidget):
         sa.viewport().setAutoFillBackground(False)
         self.level.setAutoFillBackground(False)
         lp.body.addWidget(sa)
-        grid.addWidget(lp, 5)
-
-        mid = QVBoxLayout()
-        mid.setSpacing(10)
-        ip = PixelPanel("INVENTORY", "sword")
-        self.inventory = InventoryView(3)
-        ip.body.addWidget(self.inventory)
-        mid.addWidget(ip, 3)
-        sp = PixelPanel("SCOREBOARD", "flag")
-        self.score = ScoreView()
-        sp.body.addWidget(self.score)
-        mid.addWidget(sp, 4)
-        grid.addLayout(mid, 4)
-
-        right = QVBoxLayout()
-        right.setSpacing(10)
+        lp.setToolTip("Click a stock to chart it")
+        top.addWidget(lp, 6)
+        cp = PixelPanel("PRICE CHART", "compass")
+        self.chart = PriceChart()
+        cp.body.addWidget(self.chart)
+        top.addWidget(cp, 6)
         jp = ParchmentPanel("JOURNAL")
         self.journal = JournalView()
         jp.body.addWidget(self.journal)
-        right.addWidget(jp, 3)
+        top.addWidget(jp, 5)
+
+        # bottom row: inventory | scoreboard | treasure map
+        ip = PixelPanel("INVENTORY", "sword")
+        self.inventory = InventoryView(2)
+        ip.body.addWidget(self.inventory)
+        bottom.addWidget(ip, 6)
+        sp = PixelPanel("SCOREBOARD", "flag")
+        self.score = ScoreView()
+        sp.body.addWidget(self.score)
+        bottom.addWidget(sp, 6)
         self.map = TreasureMap()
         self.map.mousePressEvent = lambda e: self.toggle_map()
         self.map.setToolTip("Click to switch between today and all live days")
-        right.addWidget(self.map, 2)
-        grid.addLayout(right, 5)
+        bottom.addWidget(self.map, 5)
 
         bar = QWidget()
         bar.setStyleSheet("background: #1f1f24;")
@@ -241,8 +249,11 @@ class MainWindow(QWidget):
         chips.append(("sound", "SOUND ON" if self.sounds.enabled else "SOUND OFF", "slot", "black"))
         self.header.set_chips(chips)
 
-        self.level.set_data(snap.get("symbols") or [], snap.get("market") or {})
+        bars = self.ds.bars() or {}
+        bars_by_sym = bars.get("symbols") or {}
+        self.level.set_data(snap.get("symbols") or [], snap.get("market") or {}, bars_by_sym)
         self.inventory.set_trades(snap.get("trades") or [])
+        self.update_chart(snap, bars)
         self.update_score(snap)
         self.update_map(snap)
 
@@ -258,6 +269,23 @@ class MainWindow(QWidget):
             self.footer.toast = ""
         self.footer.set_text(left, right)
 
+    def select_symbol(self, sym: str) -> None:
+        self.selected = sym
+        self.update_chart(self.ds.snapshot() or {}, self.ds.bars() or {})
+
+    def update_chart(self, snap: dict, bars: dict) -> None:
+        syms = [s for s in (snap.get("symbols") or []) if not s.get("market")]
+        if self.selected is None and syms:
+            busy = [s["symbol"] for s in syms if s.get("busy")]
+            self.selected = busy[0] if busy else max(syms, key=lambda s: s.get("score") or 0)["symbol"]
+            self.level.selected = self.selected
+        sym = self.selected
+        live = next((s for s in syms if s["symbol"] == sym), None)
+        trade = next((t for t in (snap.get("trades") or []) if t["symbol"] == sym), None)
+        marks = [e for e in self.journal.entries if e.get("symbol") == sym and e.get("kind") in ("taken", "exit")]
+        session = (bars["open"], bars["close"]) if bars.get("open") else None
+        self.chart.set_data(sym, (bars.get("symbols") or {}).get(sym), session, trade, marks, live)
+
     def refresh_history(self) -> None:
         try:
             self.history = self.ds.history()
@@ -266,6 +294,7 @@ class MainWindow(QWidget):
 
     def update_score(self, snap: dict) -> None:
         lines = [("#TODAY", "", "text")]
+        right: list[tuple[str, str, str]] = []
         closed = snap.get("closed_today") or []
         wins = sum(1 for t in closed if (t.get("pnl") or 0) > 0)
         counts = snap.get("counts") or {}
@@ -287,6 +316,7 @@ class MainWindow(QWidget):
         else:
             lines.append(("no finished trades yet", "", "muted"))
         vs = (snap.get("veto_score") or self.history.get("veto_score") or {})
+        left, lines = lines, right
         lines.append(("#AI VETOES (GHOST-SCORED)", "", "text"))
         for src, name in (("kronos", "Kronos"), ("finr1", "Fin-R1")):
             s = vs.get(src)
@@ -298,7 +328,7 @@ class MainWindow(QWidget):
         pr = self.history.get("practice")
         lines.append(("#LATEST PRACTICE", "", "text"))
         if pr and not pr.get("error"):
-            lines.append((pr["run"][9:40], "", "muted"))
+            lines.append((pr["run"][9:34], "", "muted"))
             if pr.get("trades"):
                 lines.append((f"{pr.get('days')} days, {pr['trades']} trades", f"{pr.get('win_rate') or 0:.0%} won", "text"))
                 pv = pr.get("pnl_realistic") or 0.0
@@ -307,7 +337,7 @@ class MainWindow(QWidget):
                 lines.append((f"{pr.get('days')} days, no trades", "", "muted"))
         else:
             lines.append(("none yet: press PRACTICE", "", "muted"))
-        self.score.set_lines(lines)
+        self.score.set_lines(left, right)
 
     def update_map(self, snap: dict) -> None:
         if self.show_all_days:
@@ -461,7 +491,7 @@ def main(argv: list[str] | None = None) -> int:
     app.setWindowIcon(px.app_icon())
     win = MainWindow(DataSource(root, data), demo=args.demo)
     if args.screenshot:
-        win.resize(1360, 860)
+        win.resize(1440, 900)
         win.show()
         for _ in range(5):
             app.processEvents()

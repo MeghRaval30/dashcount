@@ -120,33 +120,52 @@ class Header(QWidget):
 
 # --------------------------------------------------------------- the level
 class LevelView(QWidget):
-    """Watchlist rows with a centred count meter: sellers <- | -> buyers."""
+    """Watchlist rows: price, day change, a sparkline of today, and a centred
+    count meter (sellers <- | -> buyers). Click a row to chart it."""
 
-    ROW = 28
+    ROW = 26
+    symbol_clicked = Signal(str)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.rows: list[dict] = []
         self.market: dict = {}
+        self.bars: dict = {}
+        self.selected: str | None = None
         self.setMinimumHeight(self.ROW * 8)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
 
-    def set_data(self, symbols: list[dict], market: dict) -> None:
+    def set_data(self, symbols: list[dict], market: dict, bars: dict | None = None) -> None:
         stocks = [s for s in symbols if not s.get("market")]
-        stocks.sort(key=lambda s: (not s.get("busy"), -abs(s.get("tc_long") or 0)))
+        stocks.sort(key=lambda s: (not s.get("busy"), -(s.get("score") or 0)))      # stable order
         self.rows = stocks
         self.market = market or {}
-        self.setMinimumHeight(self.ROW * (len(stocks) + 2) + 8)
+        self.bars = bars or {}
+        self.setMinimumHeight(self.ROW * (len(stocks) + 2) + 10)
         self.update()
+
+    def mousePressEvent(self, e) -> None:
+        i = int((e.position().y() - 20) // self.ROW)
+        if 0 <= i < len(self.rows):
+            self.selected = self.rows[i]["symbol"]
+            self.symbol_clicked.emit(self.selected)
+            self.update()
+
+    def _cols(self, w: int) -> dict:
+        return {"sym": 4, "price": int(w * 0.15), "day": int(w * 0.30),
+                "spark": int(w * 0.41), "spark_w": int(w * 0.16), "meter": int(w * 0.60)}
 
     def paintEvent(self, e) -> None:
         p = QPainter(self)
         w = self.width()
+        c = self._cols(w)
         p.setFont(font_px(8))
         p.setPen(col("muted"))
-        p.drawText(4, 12, "STOCK")
-        p.drawText(int(w * 0.19), 12, "PRICE")
-        p.drawText(int(w * 0.36), 12, "DAY")
+        p.drawText(c["sym"], 12, "STOCK")
+        p.drawText(c["price"], 12, "PRICE")
+        p.drawText(c["day"], 12, "DAY")
+        p.drawText(c["spark"], 12, "TODAY")
         mx, mw = self._meter_box(w)
         p.drawText(mx, 12, "SELL")
         p.drawText(mx + mw - 34, 12, "BUY")
@@ -156,7 +175,7 @@ class LevelView(QWidget):
             p.setPen(col("muted"))
             p.drawText(QRect(0, 40, w, 60), Qt.AlignmentFlag.AlignCenter, "No level loaded yet.\nStart the day to build the map.")
         for s in self.rows:
-            self._row(p, y, w, s)
+            self._row(p, y, w, s, c)
             y += self.ROW
         mz = self.market.get("z")
         if mz is not None:
@@ -165,44 +184,52 @@ class LevelView(QWidget):
             p.setFont(font_vt(20))
             p.setPen(col("parch"))
             p.drawText(4, y + 18, "MARKET FLOW")
-            mx, mw = self._meter_box(w)
             self._meter(p, mx, y + 4, mw, mz)
         p.end()
 
-    def _row(self, p: QPainter, y: int, w: int, s: dict) -> None:
+    def _row(self, p: QPainter, y: int, w: int, s: dict, c: dict) -> None:
+        sym = s["symbol"]
         if s.get("busy"):
             p.fillRect(QRect(0, y, w, self.ROW - 2), col("deepslate_hi"))
-        p.setFont(font_vt(22))
+        if sym == self.selected:
+            p.setPen(col("gold"))
+            p.drawRect(QRect(0, y, w - 1, self.ROW - 3))
+        p.setFont(font_vt(21))
         p.setPen(col("gold") if s.get("busy") else col("text"))
-        p.drawText(4, y + 20, s["symbol"])
+        p.drawText(c["sym"], y + 19, sym)
         price = s.get("price")
         chg = s.get("change_pct")
         p.setPen(col("text"))
-        p.drawText(int(w * 0.19), y + 20, f"{price:,.2f}" if price else "--")
+        p.drawText(c["price"], y + 19, f"{price:,.2f}" if price else "--")
         if chg is not None:
             p.setPen(col("good") if chg >= 0 else col("bad"))
-            p.drawText(int(w * 0.36), y + 20, f"{chg:+.1f}%")
+            p.drawText(c["day"], y + 19, f"{chg:+.1f}%")
+        sb = (self.bars.get(sym) or {})
+        closes = [b[4] for b in sb.get("bars") or []]
+        if price and closes and closes[-1] != price:
+            closes = closes + [price]
+        sparkline(p, QRect(c["spark"], y + 3, c["spark_w"], self.ROW - 8), closes, sb.get("prev_close"))
         mx, mw = self._meter_box(w)
-        self._meter(p, mx, y + 6, mw, s.get("tc_long") or 0.0)
+        self._meter(p, mx, y + 5, mw, s.get("tc_long") or 0.0)
         ix = w - 20
         if s.get("busy"):
-            p.drawPixmap(ix, y + 5, px.icon_pixmap("sword", 2))
-        elif (s.get("spread_ratio") or 0) > 2 or (s.get("last_trade_age") or 0) > 180:
-            p.drawPixmap(ix, y + 5, px.icon_pixmap("spike", 2))
+            p.drawPixmap(ix, y + 4, px.icon_pixmap("sword", 2))
+        elif (s.get("spread_ratio") or 0) > 5 or (s.get("last_trade_age") or 0) > 180:
+            p.drawPixmap(ix, y + 4, px.icon_pixmap("spike", 2))
 
     @staticmethod
     def _meter_box(w: int) -> tuple[int, int]:
         """x and width of the meter area (leaves room for the value and an icon)."""
-        x = int(w * 0.50)
-        return x, max(120, w - x - 70)
+        x = int(w * 0.60)
+        return x, max(100, w - x - 64)
 
     @staticmethod
     def _meter(p: QPainter, x: int, y: int, width: int, v: float) -> None:
         """5 blocks each side; each block = 0.6 sigma; gold when |v| >= 3 (go big)."""
         n = 5
-        bw = max(5, (width - 6) // (2 * n) - 2)
+        bw = max(4, (width - 6) // (2 * n) - 2)
         cx = x + n * (bw + 2)
-        p.fillRect(QRect(cx, y - 2, 2, 18), col("parch"))
+        p.fillRect(QRect(cx, y - 2, 2, 16), col("parch"))
         filled = min(n, int(abs(v) / 0.6 + 0.5))
         for i in range(n):
             for side in (-1, 1):
@@ -212,11 +239,203 @@ class LevelView(QWidget):
                     c = "gold" if abs(v) >= 3 else ("emerald" if side > 0 else "lava")
                 else:
                     c = "deepslate_lo"
-                p.fillRect(QRect(bx, y, bw, 14), col("black"))
-                p.fillRect(QRect(bx + 1, y + 1, bw - 2, 12), col(c))
+                p.fillRect(QRect(bx, y, bw, 12), col("black"))
+                p.fillRect(QRect(bx + 1, y + 1, bw - 2, 10), col(c))
         p.setFont(font_vt(18))
         p.setPen(col("gold") if abs(v) >= 3 else col("text"))
-        p.drawText(x + 2 * n * (bw + 2) + 12, y + 13, f"{v:+.1f}")
+        p.drawText(x + 2 * n * (bw + 2) + 10, y + 11, f"{v:+.1f}")
+
+
+def sparkline(p: QPainter, r: QRect, closes: list[float], ref: float | None) -> None:
+    """Tiny stepped line of today's prices; green above the reference (prev close), red below."""
+    if len(closes) < 2:
+        p.fillRect(QRect(r.left(), r.center().y(), r.width(), 1), col("deepslate_hi"))
+        return
+    step = max(1, len(closes) // max(r.width(), 1))
+    pts = closes[::step]
+    if pts[-1] != closes[-1]:
+        pts.append(closes[-1])
+    lo, hi = min(pts + ([ref] if ref else [])), max(pts + ([ref] if ref else []))
+    span = (hi - lo) or 1.0
+
+    def yv(v):
+        return r.bottom() - int((v - lo) / span * r.height())
+
+    if ref:
+        yr = yv(ref)
+        for x in range(r.left(), r.right(), 4):
+            p.fillRect(QRect(x, yr, 2, 1), col("stone_hi"))
+    up = closes[-1] >= (ref or closes[0])
+    pen = QPen(col("emerald") if up else col("lava"), 2)
+    p.setPen(pen)
+    n = len(pts)
+    prev = None
+    for i, v in enumerate(pts):
+        x = r.left() + int(i / (n - 1) * r.width())
+        cur = QPoint(x, yv(v))
+        if prev is not None:
+            p.drawLine(prev, cur)
+        prev = cur
+
+
+# ------------------------------------------------------------- price chart
+class PriceChart(QWidget):
+    """Pixel candles for one stock: VWAP, previous close, the open trade's
+    entry/stop/target, and markers where the bot entered and exited."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.symbol: str | None = None
+        self.data: dict = {}
+        self.session: tuple[float, float] | None = None
+        self.trade: dict | None = None
+        self.marks: list[dict] = []
+        self.live: dict = {}
+        self.setMinimumHeight(220)
+
+    def set_data(self, symbol: str | None, data: dict | None, session: tuple[float, float] | None,
+                 trade: dict | None, marks: list[dict], live: dict | None) -> None:
+        self.symbol, self.data, self.session = symbol, data or {}, session
+        self.trade, self.marks, self.live = trade, marks, live or {}
+        self.update()
+
+    def paintEvent(self, e) -> None:
+        p = QPainter(self)
+        r = self.rect()
+        p.fillRect(r, col("#16161a"))
+        bars = list(self.data.get("bars") or [])
+        if not self.symbol or not bars:
+            p.setFont(font_vt(22))
+            p.setPen(col("muted"))
+            p.drawText(r, Qt.AlignmentFlag.AlignCenter,
+                       "Click a stock in THE LEVEL to see its chart." if not self.symbol else
+                       f"No bars for {self.symbol} yet: the chart fills in once the market opens.")
+            p.end()
+            return
+        vw = list(self.data.get("vwap") or [])
+        prev = self.data.get("prev_close")
+        price = self.live.get("price") or bars[-1][4]
+        # header
+        chg = (price / prev - 1) * 100 if prev else None
+        px.title(p, 8, 18, self.symbol, 12, "gold", "black")
+        p.setFont(font_vt(22))
+        p.setPen(col("text"))
+        p.drawText(8 + 14 * len(self.symbol) + 14, 19, f"{price:,.2f}")
+        if chg is not None:
+            p.setPen(col("good") if chg >= 0 else col("bad"))
+            p.drawText(8 + 14 * len(self.symbol) + 100, 19, f"{chg:+.2f}%")
+        p.setFont(font_vt(18))
+        p.setPen(col("muted"))
+        p.drawText(QRect(0, 2, r.width() - 8, 20), Qt.AlignmentFlag.AlignRight,
+                   "candles  -- VWAP  .. prev close")
+        area = QRect(8, 30, r.width() - 70, r.height() - 62)
+        vol_h = 26
+        price_area = QRect(area.left(), area.top(), area.width(), area.height() - vol_h - 4)
+        # aggregate minutes so each candle gets >= 4 px
+        n = len(bars)
+        k = 1
+        for kk in (1, 2, 3, 5, 10, 15, 30):
+            k = kk
+            if n / kk <= price_area.width() / 4:
+                break
+        cand = []
+        for i in range(0, n, k):
+            g = bars[i:i + k]
+            cand.append((g[0][0], g[0][1], max(b[2] for b in g), min(b[3] for b in g), g[-1][4], sum(b[5] for b in g),
+                         vw[min(i + k, len(vw)) - 1] if vw else None))
+        levels = [c[2] for c in cand] + [c[3] for c in cand]
+        if prev:
+            levels.append(prev)
+        if self.trade:
+            levels += [self.trade.get("stop"), self.trade.get("target"), self.trade.get("entry")]
+        levels = [v for v in levels if v]
+        lo, hi = min(levels), max(levels)
+        pad = (hi - lo) * 0.06 or 0.5
+        lo, hi = lo - pad, hi + pad
+        t0, t1 = (self.session or (bars[0][0], bars[-1][0] + 60))
+        span_t = max(t1 - t0, 60)
+
+        def xt(t):
+            return price_area.left() + int((t - t0) / span_t * price_area.width())
+
+        def yp(v):
+            return price_area.bottom() - int((v - lo) / (hi - lo) * price_area.height())
+
+        # grid + axes
+        p.setFont(font_vt(16))
+        for i in range(5):
+            v = lo + (hi - lo) * i / 4
+            y = yp(v)
+            for x in range(price_area.left(), price_area.right(), 6):
+                p.fillRect(QRect(x, y, 2, 1), col("#2a2a30"))
+            p.setPen(col("muted"))
+            p.drawText(price_area.right() + 6, y + 5, f"{v:,.2f}")
+        for hh in range(10, 16):
+            t = t0 + (hh * 60 - 9 * 60 - 30) * 60
+            if t0 < t < t1:
+                x = xt(t)
+                for y in range(price_area.top(), price_area.bottom(), 6):
+                    p.fillRect(QRect(x, y, 1, 2), col("#2a2a30"))
+                p.setPen(col("muted"))
+                p.drawText(x - 10, r.height() - 8, f"{hh}:00")
+        if prev:
+            y = yp(prev)
+            for x in range(price_area.left(), price_area.right(), 8):
+                p.fillRect(QRect(x, y, 3, 1), col("stone_hi"))
+        # candles
+        cw = max(2, int(price_area.width() / max(span_t / (60 * k), 1)) - 1)
+        vmax = max((c[5] for c in cand), default=1) or 1
+        prev_vw = None
+        for t, o, h, l, cl, v, vwv in cand:
+            x = xt(t)
+            up = cl >= o
+            colr = col("emerald") if up else col("lava")
+            p.fillRect(QRect(x + cw // 2, yp(h), 1, max(1, yp(l) - yp(h))), colr)
+            top, bot = yp(max(o, cl)), yp(min(o, cl))
+            p.fillRect(QRect(x, top, cw, max(2, bot - top)), colr)
+            vh = int(v / vmax * vol_h)
+            p.fillRect(QRect(x, area.bottom() - vh, cw, vh), col("stone_lo"))
+            if vwv:
+                cur = QPoint(x + cw // 2, yp(vwv))
+                if prev_vw is not None:
+                    p.setPen(QPen(col("gold"), 2))
+                    p.drawLine(prev_vw, cur)
+                prev_vw = cur
+        # open trade levels
+        if self.trade:
+            for key, name, c in (("target", "TARGET", "diamond"), ("entry", "ENTRY", "text"), ("stop", "STOP", "lava")):
+                v = self.trade.get(key)
+                if v:
+                    y = yp(v)
+                    p.fillRect(QRect(price_area.left(), y, price_area.width(), 2), col(c))
+                    p.setFont(font_px(7))
+                    label = f"{name} {v:,.2f}"
+                    lw = p.fontMetrics().horizontalAdvance(label) + 8
+                    box = QRect(price_area.right() - lw - 4, y - 14 if key != "stop" else y + 4, lw, 12)
+                    p.fillRect(box, col("#16161a"))
+                    p.setPen(col(c))
+                    p.drawText(box, Qt.AlignmentFlag.AlignCenter, label)
+        # markers from the journal
+        for m in self.marks:
+            ts, kind = m.get("ts"), m.get("kind")
+            if not ts or not (t0 <= ts <= t1):
+                continue
+            near = min(bars, key=lambda b: abs(b[0] - ts))
+            x, y = xt(ts), yp(near[4])
+            if kind == "taken":
+                long_ = "long" in (m.get("text") or "")
+                px.triangle(p, x - 6, y - 16 if long_ else y + 4, 12, long_, "gold")
+            elif kind == "exit":
+                p.setFont(font_px(10))
+                p.setPen(col("good") if (m.get("pnl") or 0) > 0 else col("bad"))
+                p.drawText(x - 5, y - 6, "X")
+        # last price tag
+        y = yp(price)
+        p.fillRect(QRect(price_area.right() + 2, y - 9, 62, 18), col("gold"))
+        p.setFont(font_vt(18))
+        p.setPen(col("black"))
+        p.drawText(QRect(price_area.right() + 2, y - 9, 60, 18), Qt.AlignmentFlag.AlignCenter, f"{price:,.2f}")
+        p.end()
 
 
 # --------------------------------------------------------------- inventory
@@ -227,20 +446,19 @@ class InventoryView(QWidget):
         super().__init__(parent)
         self.slots = slots
         self.trades: list[dict] = []
-        self.setMinimumHeight(slots * (self.SLOT_H + 6))
+        self.setMinimumHeight(slots * 62)
 
     def set_trades(self, trades: list[dict]) -> None:
         self.trades = trades
-        n = max(self.slots, len(trades))
-        self.setMinimumHeight(n * (self.SLOT_H + 6))
         self.update()
 
     def paintEvent(self, e) -> None:
         p = QPainter(self)
         w = self.width()
         n = max(self.slots, len(self.trades))
+        h = max(56, min(self.SLOT_H, (self.height() - 6 * (n - 1)) // n))
         for i in range(n):
-            r = QRect(0, i * (self.SLOT_H + 6), w, self.SLOT_H)
+            r = QRect(0, i * (h + 6), w, h)
             t = self.trades[i] if i < len(self.trades) else None
             px.slot(p, r, selected=bool(t))
             if t:
@@ -417,31 +635,39 @@ class TreasureMap(QWidget):
 
 # --------------------------------------------------------------- scoreboard
 class ScoreView(QWidget):
+    """Stats in two columns: lines starting with '#' are section titles."""
+
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        self.lines: list[tuple[str, str, str]] = []
+        self.left: list[tuple[str, str, str]] = []
+        self.right: list[tuple[str, str, str]] = []
         self.setMinimumHeight(150)
 
-    def set_lines(self, lines: list[tuple[str, str, str]]) -> None:
-        self.lines = lines
-        self.setMinimumHeight(24 * len(lines) + 6)
+    def set_lines(self, left: list[tuple[str, str, str]], right: list[tuple[str, str, str]] | None = None) -> None:
+        self.left, self.right = left, right or []
+        self.setMinimumHeight(22 * max(len(self.left), len(self.right)) + 6)
         self.update()
 
     def paintEvent(self, e) -> None:
         p = QPainter(self)
-        y = 18
-        for label, value, color in self.lines:
-            if label.startswith("#"):
-                p.setFont(font_px(8))
-                p.setPen(col("gold"))
-                p.drawText(0, y, label[1:])
-            else:
-                p.setFont(font_vt(20))
-                p.setPen(col("muted"))
-                p.drawText(0, y, label)
-                p.setPen(col(color))
-                p.drawText(QRect(0, y - 18, self.width() - 4, 24), Qt.AlignmentFlag.AlignRight, value)
-            y += 24
+        half = self.width() // 2 if self.right else self.width()
+        for x0, lines in ((0, self.left), (half + 10, self.right)):
+            wcol = half - 12
+            y = 16
+            for label, value, color in lines:
+                if label.startswith("#"):
+                    p.setFont(font_px(8))
+                    p.setPen(col("gold"))
+                    p.drawText(x0, y, label[1:])
+                else:
+                    p.setFont(font_vt(19))
+                    p.setPen(col("muted"))
+                    p.drawText(x0, y, label)
+                    p.setPen(col(color))
+                    p.drawText(QRect(x0, y - 17, wcol, 22), Qt.AlignmentFlag.AlignRight, value)
+                y += 22
+        if self.right:
+            p.fillRect(QRect(half, 0, 2, self.height()), col("deepslate_hi"))
         p.end()
 
 
