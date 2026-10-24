@@ -42,6 +42,12 @@ features:
   atr_daily_period: 14
   volume_profile_days: 20
   feed_share_days: 5
+  # IEX's own book is usually much wider than the real (NBBO) spread, so on the
+  # IEX feed costs/hazards/simulated fills use each stock's NBBO spread measured
+  # from the previous session's full-market quotes (capped by the IEX spread).
+  default_nbbo_bps: 8.0
+  spread_sample_windows: ["09:50", "11:00", "14:00"]
+  spread_sample_minutes: 2
 
 pads:
   orb:
@@ -64,7 +70,8 @@ pads:
 
 hazards:
   spread_mult: 2.0
-  spread_max_pct: 0.5
+  spread_mult_iex: 5.0              # IEX's book jumps around: only flag big blowouts
+  spread_max_pct: 0.5               # applied to the NBBO estimate
   dead_volume_mult: 0.5
   already_ran_atr: 3.0
   cost_mult: 4.0

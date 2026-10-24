@@ -78,3 +78,19 @@ def test_seed_today_backfills_vwap_open_and_atr():
     assert st.bars.atr is not None and st.bars.high == 130
     st.bars.seed(bars[:5])                       # idempotent for already-seen minutes
     assert len(st.bars.bars) == 30
+
+
+def test_est_spread_iex_uses_nbbo_model_and_sip_uses_quote():
+    from dashcount.features import SymbolState
+    from dashcount.models import WatchItem
+    from helpers import cfg as _cfg, session as _session
+
+    c = _cfg()
+    iex = SymbolState(WatchItem("X", nbbo_spread_bps=5.0), c.features, _session().open, "iex")
+    iex.on_quote(quote(at("10:00"), 99.0, 101.0, symbol="X"))       # IEX book: 200 bps wide
+    assert abs(iex.est_spread() - 0.05) < 1e-9                        # 5 bps of 100
+    iex.on_quote(quote(at("10:00", 1), 99.99, 100.01, symbol="X"))  # IEX at the inside: narrower wins
+    assert abs(iex.est_spread() - 0.02) < 1e-9
+    sip = SymbolState(WatchItem("X"), c.features, _session().open, "sip")
+    sip.on_quote(quote(at("10:00"), 99.0, 101.0, symbol="X"))
+    assert sip.est_spread() == 2.0

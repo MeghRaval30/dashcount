@@ -112,6 +112,19 @@ def download(cfg: Config, start, end, feeds: tuple[str, ...] = ("iex",), ticks: 
                     q.to_parquet(store.quotes_path(feed, d, x), index=False)
                     t = trades.get(x, pd.DataFrame(columns=["ts", "price", "size"]))
                     t.to_parquet(store.trades_path(feed, d, x), index=False)
+            prev_day = cal.previous_sessions(d, 1)[0]
+            sp = store.spreads_path(prev_day)
+            if not sp.exists():
+                stocks = [x for x in plan.symbols if x not in cfg.universe.market_symbols]
+                try:
+                    import json as _json
+
+                    vals = data.spread_bps(stocks, prev_day, tuple(cfg.features.spread_sample_windows),
+                                           cfg.features.spread_sample_minutes)
+                    sp.parent.mkdir(parents=True, exist_ok=True)
+                    sp.write_text(_json.dumps(vals))
+                except Exception as e:
+                    log.warning("spread sample for %s failed: %s", prev_day, e)
             if feed != "sip":
                 prev = cal.previous_sessions(d, 1)[0]
                 pp = store.minute_path(feed, prev)

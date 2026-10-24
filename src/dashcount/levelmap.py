@@ -205,6 +205,13 @@ class LevelMap:
         etb = dict(zip(assets["symbol"], assets["easy_to_borrow"])) if len(assets) else {}
         last_s = self.cal.session(prev[-1])
         hist = to_bars(self.data.minutes(chosen, last_s.open, last_s.close, feed))
+        try:
+            spreads = self.data.spread_bps([c for c in chosen if c not in mkt], prev[-1],
+                                           tuple(cfg.features.spread_sample_windows),
+                                           cfg.features.spread_sample_minutes) if hasattr(self.data, "spread_bps") else {}
+        except Exception as e:
+            log.warning("NBBO spread sample unavailable (%s); using the default", e)
+            spreads = {}
 
         st = stats.set_index("symbol")
         items = []
@@ -221,6 +228,7 @@ class LevelMap:
                 feed_share=share.get(sym, 1.0 if feed == "sip" else DEFAULT_FEED_SHARE),
                 volume_profile=profiles.get(sym, []),
                 is_market=sym in mkt,
+                nbbo_spread_bps=spreads.get(sym),
             ))
 
         blocked, last_entry, flatten_at, flags = self._windows(session)

@@ -324,6 +324,7 @@ class SymbolState:
         self.last_price: float | None = None
         self.pad_state: dict = {}
         self.last_loss_exit_ts = -1e18
+        self.default_nbbo_bps = getattr(f, "default_nbbo_bps", 8.0)
         self._update_normal_window(session_open)
 
     # normal volume -----------------------------------------------------------
@@ -365,3 +366,18 @@ class SymbolState:
 
     def z(self, now: float) -> float:
         return self.flow.z(now)
+
+    def nbbo_bps(self) -> float:
+        return self.item.nbbo_spread_bps or self.default_nbbo_bps
+
+    def est_spread(self) -> float | None:
+        """Best guess of the real (NBBO) spread. On the SIP feed that's the quote
+        itself; on IEX the quote is an upper bound, so use min(IEX, typical NBBO)."""
+        raw = self.spread.spread
+        if self.feed != "iex":
+            return raw
+        mid = self.spread.mid or self.last_price
+        if not mid:
+            return raw
+        model = max(0.01, mid * self.nbbo_bps() / 1e4)
+        return min(raw, model) if raw else model

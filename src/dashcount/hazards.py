@@ -35,16 +35,19 @@ def check(c: Candidate, s: SymbolState, ctx: HazardContext, cfg) -> tuple[list[s
     vals: dict = {}
     price = s.last_price or c.entry
 
-    # spread
+    # spread: relative jump on the feed's own book, absolute cap on the NBBO estimate
     spread = s.spread.spread
     normal_spread = s.spread.normal()
+    est = s.est_spread()
     vals["spread"] = spread
+    vals["spread_est"] = est
+    vals["spread_bps_est"] = (est / price * 1e4) if (est and price) else None
     vals["spread_ratio"] = (spread / normal_spread) if (spread and normal_spread) else None
-    if spread is not None:
-        if spread > cfg.spread_max_pct / 100.0 * price:
-            fired.append("spread_blowout")
-        elif normal_spread and spread > cfg.spread_mult * normal_spread:
-            fired.append("spread_blowout")
+    mult = cfg.spread_mult_iex if ctx.feed == "iex" else cfg.spread_mult
+    if est is not None and est > cfg.spread_max_pct / 100.0 * price:
+        fired.append("spread_blowout")
+    elif spread is not None and normal_spread and spread > mult * normal_spread:
+        fired.append("spread_blowout")
 
     # dead volume: last 5 bars vs normal 5-minute volume
     vol5 = s.bars.recent_volume(5)
@@ -61,7 +64,7 @@ def check(c: Candidate, s: SymbolState, ctx: HazardContext, cfg) -> tuple[list[s
         fired.append("already_ran")
 
     # too costly
-    sp = spread if spread is not None else (normal_spread or 0.0)
+    sp = est if est is not None else (normal_spread or 0.0)
     cost = round_trip_cost(price, sp, ctx.slippage_bps, ctx.sec_fee_per_million, ctx.taf_per_share)
     tgt = abs(c.target - c.entry)
     vals["target_to_cost"] = tgt / cost if cost > 0 else None

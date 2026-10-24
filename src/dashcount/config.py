@@ -58,6 +58,9 @@ class FeaturesCfg(BaseModel):
     atr_daily_period: int
     volume_profile_days: int
     feed_share_days: int
+    default_nbbo_bps: float = 8.0
+    spread_sample_windows: list[str] = ["09:50", "11:00", "14:00"]
+    spread_sample_minutes: int = 2
 
 
 class OrbCfg(BaseModel):
@@ -88,6 +91,7 @@ class PadsCfg(BaseModel):
 
 class HazardsCfg(BaseModel):
     spread_mult: float
+    spread_mult_iex: float = 5.0
     spread_max_pct: float
     dead_volume_mult: float
     already_ran_atr: float

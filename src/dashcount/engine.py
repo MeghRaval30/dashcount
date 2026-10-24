@@ -144,6 +144,8 @@ class Engine:
         if self.sim is not None:
             self.sim.start_day()
             self.sim.normal_volume_fn = self._sip_minute_volume
+            self.sim.spread_bps_fn = (lambda s: self.states[s].nbbo_bps() if s in self.states else None) \
+                if feed == "iex" else (lambda s: None)
         if self.guardian is not None:
             self.guardian.new_day(self.session.day.isoformat(), self.start_equity)
         self.finished = False
@@ -317,6 +319,8 @@ class Engine:
             "minutes_since_open": (self.now - self.session.open) / 60 / 390,
             "spread_ratio": vals.get("spread_ratio"),
             "risk_atr": c.risk / st.item.atr_daily if st.item.atr_daily else None,
+            "spread": vals.get("spread"), "spread_est": vals.get("spread_est"),
+            "spread_bps_est": vals.get("spread_bps_est"), "nbbo_bps": st.nbbo_bps(),
             "target_to_cost": vals.get("target_to_cost"),
             "seconds_since_trade": vals.get("seconds_since_trade"),
             "atr_1m": atr1, "vwap": vwap, "price": price,

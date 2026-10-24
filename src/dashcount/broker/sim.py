@@ -54,6 +54,8 @@ class SimBroker:
         self._listener: Callable[[OrderUpdate], None] | None = None
         # set by the engine: expected SIP volume per minute for slippage
         self.normal_volume_fn: Callable[[str, float], float | None] = lambda s, t: None
+        # set by the engine on the IEX feed: typical NBBO spread (bps) per symbol
+        self.spread_bps_fn: Callable[[str], float | None] = lambda s: None
 
     # ------------------------------------------------------------------ API
     def set_listener(self, fn: Callable[[OrderUpdate], None]) -> None:
@@ -146,10 +148,17 @@ class SimBroker:
         return price * min(bps, self.cfg.max_slippage_bps) / 1e4
 
     def _quote(self, symbol: str) -> Quote | None:
+        """Latest fresh quote, narrowed to the estimated NBBO when the feed's book
+        is only an upper bound (IEX): the real best prices are never worse."""
         q = self.quotes.get(symbol)
-        if q and q.bid > 0 and q.ask >= q.bid and self.now - q.ts <= 5:
-            return q
-        return None
+        if not (q and q.bid > 0 and q.ask >= q.bid and self.now - q.ts <= 5):
+            return None
+        bps = self.spread_bps_fn(symbol)
+        if bps:
+            mid = (q.bid + q.ask) / 2
+            half = min((q.ask - q.bid) / 2, max(0.005, mid * bps / 2e4))
+            return Quote(q.symbol, q.ts, mid - half, mid + half, q.bid_size, q.ask_size)
+        return q
 
     def _on_activate(self, o: SimOrder) -> None:
         q = self._quote(o.symbol)

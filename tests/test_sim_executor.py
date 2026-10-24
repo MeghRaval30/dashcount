@@ -105,3 +105,16 @@ def test_fees_charged_on_sells():
     _tick(b, ex, t0 + 1, 100.0)
     _tick(b, ex, t0 + 2, 102.5)
     assert b.fees_paid > 0
+
+
+def test_sim_fills_against_nbbo_estimate_on_iex():
+    c, b, ex, closed = _setup()
+    b.spread_bps_fn = lambda s: 4.0                  # real spread ~4 bps; IEX shows 2%
+    t0 = at("10:00")
+    b.on_quote(quote(t0, 99.0, 101.0))
+    b.on_trade(trade(t0, 100.0))
+    ex.enter(Candidate("TEST", t0, "orb", LONG, 100.0, 99.0, 102.0), 100, t0)
+    b.on_quote(quote(t0 + 1, 99.0, 101.0))
+    b.on_trade(trade(t0 + 1, 100.0))
+    tr = ex.trades[ex.by_symbol["TEST"]]
+    assert tr.state == "open" and tr.avg_entry < 100.1      # not filled at IEX's 101 ask

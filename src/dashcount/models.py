@@ -65,6 +65,7 @@ class WatchItem:
     # median SIP volume per 5-minute bucket of the regular session (78 buckets)
     volume_profile: list[float] = field(default_factory=list)
     is_market: bool = False
+    nbbo_spread_bps: float | None = None      # typical real spread, from the previous session
 
 
 @dataclass
