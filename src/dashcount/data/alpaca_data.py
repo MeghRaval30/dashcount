@@ -100,8 +100,8 @@ class AlpacaData:
             return r.json()
         raise RuntimeError(f"Alpaca {path}: too many retries")
 
-    def _paged(self, path: str, key: str, params: dict) -> dict[str, list]:
-        out: dict[str, list] = {}
+    def _pages(self, path: str, key: str, params: dict):
+        """Yield (symbol, rows) one page at a time, so a big day never sits in memory as raw JSON."""
         token = None
         while True:
             p = dict(params, limit=10000)
@@ -109,10 +109,17 @@ class AlpacaData:
                 p["page_token"] = token
             js = self._get(path, p)
             for sym, rows in (js.get(key) or {}).items():
-                out.setdefault(sym, []).extend(rows)
+                if rows:
+                    yield sym, rows
             token = js.get("next_page_token")
             if not token:
-                return out
+                return
+
+    def _paged(self, path: str, key: str, params: dict) -> dict[str, list]:
+        out: dict[str, list] = {}
+        for sym, rows in self._pages(path, key, params):
+            out.setdefault(sym, []).extend(rows)
+        return out
 
     # ------------------------------------------------------------- bars
     def bars(self, symbols: list[str], timeframe: str, start, end, feed: str) -> pd.DataFrame:
@@ -161,42 +168,39 @@ class AlpacaData:
 
     # ------------------------------------------------------------- ticks
     def trades(self, symbols: list[str], start: float, end: float, feed: str) -> dict[str, pd.DataFrame]:
-        got = self._paged("/v2/stocks/trades", "trades", {
+        parts: dict[str, list[pd.DataFrame]] = {}
+        for sym, rows in self._pages("/v2/stocks/trades", "trades", {
             "symbols": ",".join(symbols), "start": _rfc(start), "end": _rfc(end), "feed": feed, "sort": "asc",
-        })
-        out = {}
-        for sym, rows in got.items():
-            if not rows:
-                continue
+        }):
             df = pd.DataFrame(rows)
             conds = df["c"] if "c" in df else pd.Series([[]] * len(df))
             ok = conds.map(lambda c: not (set(c or []) & BAD_CONDITIONS))
             df = df[ok]
-            out[sym] = pd.DataFrame({
+            parts.setdefault(sym, []).append(pd.DataFrame({
                 "ts": _epoch(df["t"]).to_numpy(), "price": df["p"].astype(float).to_numpy(),
                 "size": df["s"].astype(float).to_numpy(),
-            })
-        return out
+            }))
+        return {sym: pd.concat(p, ignore_index=True) for sym, p in parts.items()}
 
     def quotes(self, symbols: list[str], start: float, end: float, feed: str) -> dict[str, pd.DataFrame]:
-        got = self._paged("/v2/stocks/quotes", "quotes", {
-            "symbols": ",".join(symbols), "start": _rfc(start), "end": _rfc(end), "feed": feed, "sort": "asc",
-        })
-        out = {}
-        for sym, rows in got.items():
-            if not rows:
-                continue
-            df = pd.DataFrame(rows)
-            q = pd.DataFrame({
-                "ts": _epoch(df["t"]).to_numpy(),
-                "bid": df["bp"].astype("float32").to_numpy(), "ask": df["ap"].astype("float32").to_numpy(),
-                "bid_size": df["bs"].astype("float32").to_numpy(), "ask_size": df["as"].astype("float32").to_numpy(),
-            })
+        def changed(q: pd.DataFrame) -> pd.DataFrame:
             # keep only rows where the top of book actually changed
             chg = (q[["bid", "ask", "bid_size", "ask_size"]].diff().abs().sum(axis=1) != 0).to_numpy().copy()
             chg[0] = True
-            out[sym] = q[chg].reset_index(drop=True)
-        return out
+            return q[chg]
+
+        parts: dict[str, list[pd.DataFrame]] = {}
+        for sym, rows in self._pages("/v2/stocks/quotes", "quotes", {
+            "symbols": ",".join(symbols), "start": _rfc(start), "end": _rfc(end), "feed": feed, "sort": "asc",
+        }):
+            df = pd.DataFrame(rows)
+            parts.setdefault(sym, []).append(changed(pd.DataFrame({
+                "ts": _epoch(df["t"]).to_numpy(),
+                "bid": df["bp"].astype("float32").to_numpy(), "ask": df["ap"].astype("float32").to_numpy(),
+                "bid_size": df["bs"].astype("float32").to_numpy(), "ask_size": df["as"].astype("float32").to_numpy(),
+            })))
+        # a page can start with the same top of book the previous page ended on
+        return {sym: changed(pd.concat(p, ignore_index=True)).reset_index(drop=True) for sym, p in parts.items()}
 
     def spread_bps(self, symbols: list[str], day, windows=("09:50", "11:00", "14:00"), minutes: int = 2) -> dict[str, float]:
         """Median NBBO spread (bps) per symbol over a few short windows of `day` (SIP quotes)."""

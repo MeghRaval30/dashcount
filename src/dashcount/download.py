@@ -103,15 +103,15 @@ def download(cfg: Config, start, end, feeds: tuple[str, ...] = ("iex",), ticks: 
             if want:
                 tdir = store.ticks_dir(feed, d)
                 tdir.mkdir(parents=True, exist_ok=True)
-                trades = data.trades(want, s.open, s.close, feed)
+            # one symbol at a time: a full-market (SIP) day is millions of rows per stock.
+            # The trades file is written last, so it marks the symbol as done.
+            for x in want:
                 # like live: the market funds only feed the count, so no quotes for them
-                qwant = [x for x in want if x not in cfg.universe.market_symbols]
-                quotes = data.quotes(qwant, s.open, s.close, feed) if qwant else {}
-                for x in want:
-                    q = quotes.get(x, pd.DataFrame(columns=["ts", "bid", "ask", "bid_size", "ask_size"]))
-                    q.to_parquet(store.quotes_path(feed, d, x), index=False)
-                    t = trades.get(x, pd.DataFrame(columns=["ts", "price", "size"]))
-                    t.to_parquet(store.trades_path(feed, d, x), index=False)
+                quotes = data.quotes([x], s.open, s.close, feed) if x not in cfg.universe.market_symbols else {}
+                q = quotes.get(x, pd.DataFrame(columns=["ts", "bid", "ask", "bid_size", "ask_size"]))
+                q.to_parquet(store.quotes_path(feed, d, x), index=False)
+                t = data.trades([x], s.open, s.close, feed).get(x, pd.DataFrame(columns=["ts", "price", "size"]))
+                t.to_parquet(store.trades_path(feed, d, x), index=False)
             prev_day = cal.previous_sessions(d, 1)[0]
             sp = store.spreads_path(prev_day)
             if not sp.exists():

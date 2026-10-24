@@ -60,6 +60,24 @@ def test_trades_filter_bad_conditions_and_quotes_dedupe():
     assert len(q) == 2
 
 
+
+def test_ticks_stream_page_by_page_and_dedupe_across_pages():
+    # big SIP days are converted one page at a time; an unchanged quote at the top
+    # of the next page is still a duplicate
+    def handler(req):
+        last = "page_token" in req.url.params
+        if req.url.path.endswith("/trades"):
+            rows = [{"t": "2025-03-12T14:00:03Z", "p": 10.02, "s": 10, "c": ["@"]}] if last else                    [{"t": "2025-03-12T14:00:00Z", "p": 10.0, "s": 100, "c": ["@"]}]
+            return httpx.Response(200, json={"trades": {"X": rows}, "next_page_token": None if last else "p2"})
+        rows = [{"t": "2025-03-12T14:00:02Z", "bp": 9.99, "ap": 10.01, "bs": 1, "as": 2},      # same top: dropped
+                {"t": "2025-03-12T14:00:03Z", "bp": 10.0, "ap": 10.02, "bs": 1, "as": 2}] if last else                [{"t": "2025-03-12T14:00:00Z", "bp": 9.99, "ap": 10.01, "bs": 1, "as": 2}]
+        return httpx.Response(200, json={"quotes": {"X": rows}, "next_page_token": None if last else "p2"})
+
+    ad = AlpacaData("k", "s", client=_client(handler))
+    assert ad.trades(["X"], 0, 1, "sip")["X"]["price"].tolist() == [10.0, 10.02]
+    q = ad.quotes(["X"], 0, 1, "sip")["X"]
+    assert [round(float(b), 2) for b in q["bid"]] == [9.99, 10.0] and ad.requests == 4
+
 def test_rate_limit_retry(monkeypatch):
     import dashcount.data.alpaca_data as m
 
