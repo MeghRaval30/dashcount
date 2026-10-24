@@ -131,12 +131,14 @@ class LevelView(QWidget):
         self.rows: list[dict] = []
         self.market: dict = {}
         self.bars: dict = {}
+        self.live = True
         self.selected: str | None = None
         self.setMinimumHeight(self.ROW * 8)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
 
-    def set_data(self, symbols: list[dict], market: dict, bars: dict | None = None) -> None:
+    def set_data(self, symbols: list[dict], market: dict, bars: dict | None = None, live: bool = True) -> None:
+        self.live = live
         stocks = [s for s in symbols if not s.get("market")]
         stocks.sort(key=lambda s: (not s.get("busy"), -(s.get("score") or 0)))      # stable order
         self.rows = stocks
@@ -214,7 +216,7 @@ class LevelView(QWidget):
         ix = w - 20
         if s.get("busy"):
             p.drawPixmap(ix, y + 4, px.icon_pixmap("sword", 2))
-        elif (s.get("spread_ratio") or 0) > 5 or (s.get("last_trade_age") or 0) > 180:
+        elif self.live and ((s.get("spread_ratio") or 0) > 5 or (s.get("last_trade_age") or 0) > 180):
             p.drawPixmap(ix, y + 4, px.icon_pixmap("spike", 2))
 
     @staticmethod
@@ -291,6 +293,8 @@ class PriceChart(QWidget):
         self.trade: dict | None = None
         self.marks: list[dict] = []
         self.live: dict = {}
+        self.empty_text = ""
+        self.source = ""
         self.setMinimumHeight(220)
 
     def set_data(self, symbol: str | None, data: dict | None, session: tuple[float, float] | None,
@@ -307,27 +311,33 @@ class PriceChart(QWidget):
         if not self.symbol or not bars:
             p.setFont(font_vt(22))
             p.setPen(col("muted"))
-            p.drawText(r, Qt.AlignmentFlag.AlignCenter,
-                       "Click a stock in THE LEVEL to see its chart." if not self.symbol else
-                       f"No bars for {self.symbol} yet: the chart fills in once the market opens.")
+            msg = ("Click a stock in THE LEVEL to see its chart." if not self.symbol else
+                   self.empty_text or f"No bars for {self.symbol} yet.")
+            p.drawText(r.adjusted(20, 0, -20, 0), Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextWordWrap, msg)
             p.end()
             return
         vw = list(self.data.get("vwap") or [])
         prev = self.data.get("prev_close")
         price = self.live.get("price") or bars[-1][4]
-        # header
+        # header: symbol, price, change; legend on the right if there is room
         chg = (price / prev - 1) * 100 if prev else None
         px.title(p, 8, 18, self.symbol, 12, "gold", "black")
+        x = 8 + p.fontMetrics().horizontalAdvance(self.symbol) + 16
         p.setFont(font_vt(22))
         p.setPen(col("text"))
-        p.drawText(8 + 14 * len(self.symbol) + 14, 19, f"{price:,.2f}")
+        ptxt = f"{price:,.2f}"
+        p.drawText(x, 19, ptxt)
+        x += p.fontMetrics().horizontalAdvance(ptxt) + 14
         if chg is not None:
             p.setPen(col("good") if chg >= 0 else col("bad"))
-            p.drawText(8 + 14 * len(self.symbol) + 100, 19, f"{chg:+.2f}%")
+            ctxt = f"{chg:+.2f}%"
+            p.drawText(x, 19, ctxt)
+            x += p.fontMetrics().horizontalAdvance(ctxt) + 14
         p.setFont(font_vt(18))
-        p.setPen(col("muted"))
-        p.drawText(QRect(0, 2, r.width() - 8, 20), Qt.AlignmentFlag.AlignRight,
-                   "candles  -- VWAP  .. prev close")
+        legend = ("history: " if self.source == "alpaca" else "") + "-- VWAP  .. prev close"
+        if r.width() - 8 - p.fontMetrics().horizontalAdvance(legend) > x:
+            p.setPen(col("muted"))
+            p.drawText(QRect(0, 2, r.width() - 8, 20), Qt.AlignmentFlag.AlignRight, legend)
         area = QRect(8, 30, r.width() - 70, r.height() - 62)
         vol_h = 26
         price_area = QRect(area.left(), area.top(), area.width(), area.height() - vol_h - 4)

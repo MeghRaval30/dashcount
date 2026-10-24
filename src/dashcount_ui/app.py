@@ -251,7 +251,8 @@ class MainWindow(QWidget):
 
         bars = self.ds.bars() or {}
         bars_by_sym = bars.get("symbols") or {}
-        self.level.set_data(snap.get("symbols") or [], snap.get("market") or {}, bars_by_sym)
+        self.level.set_data(snap.get("symbols") or [], snap.get("market") or {}, bars_by_sym,
+                            live=state == "LIVE")
         self.inventory.set_trades(snap.get("trades") or [])
         self.update_chart(snap, bars)
         self.update_score(snap)
@@ -284,6 +285,12 @@ class MainWindow(QWidget):
         trade = next((t for t in (snap.get("trades") or []) if t["symbol"] == sym), None)
         marks = [e for e in self.journal.entries if e.get("symbol") == sym and e.get("kind") in ("taken", "exit")]
         session = (bars["open"], bars["close"]) if bars.get("open") else None
+        src = self.ds.chart_source
+        self.chart.empty_text = {
+            "loading": f"Loading {sym}'s minute bars from Alpaca...",
+            "none": f"No bars for {sym} yet: they appear once the bot runs (or when Alpaca keys are set).",
+        }.get(src, f"No bars for {sym} on this day.")
+        self.chart.source = src
         self.chart.set_data(sym, (bars.get("symbols") or {}).get(sym), session, trade, marks, live)
 
     def refresh_history(self) -> None:
@@ -480,6 +487,12 @@ def main(argv: list[str] | None = None) -> int:
 
     root = project_root()
     os.environ.setdefault("DASHCOUNT_HOME", str(root))        # so bot modules find config/ when packaged
+    try:
+        from dotenv import load_dotenv
+
+        load_dotenv(root / ".env")                            # Alpaca keys for chart history
+    except Exception:
+        pass
     data = Path(args.data) if args.data else None
     if args.demo:
         from .demo import build_demo

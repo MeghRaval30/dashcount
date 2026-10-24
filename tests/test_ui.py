@@ -97,3 +97,40 @@ def test_icon_and_fonts(tmp_path):
     assert (px.FONT_DIR / "PressStart2P-Regular.ttf").exists()
     px.save_ico(tmp_path / "x.ico")
     assert (tmp_path / "x.ico").exists() or (tmp_path / "x.png").exists()
+
+
+def test_chart_falls_back_to_alpaca_history(tmp_path, monkeypatch):
+    """No bars from the bot for the day on screen -> fetch that session once, cache it."""
+    import time as _t
+
+    import pandas as pd
+
+    import dashcount.data.alpaca_data as ad
+    from dashcount_ui.datasource import DataSource
+
+    st = tmp_path / "state"
+    st.mkdir()
+    (st / "live_snapshot.json").write_text(json.dumps({
+        "day": "2026-10-22", "symbols": [{"symbol": "AAA", "price": 110.0, "change_pct": 10.0}]}))
+
+    class FakeAD:
+        def __init__(self, *a, **k):
+            pass
+
+        def minutes(self, syms, start, end, feed):
+            return pd.DataFrame({"symbol": ["AAA", "AAA"], "ts": [start, start + 60], "open": [100.0, 101.0],
+                                 "high": [102.0, 103.0], "low": [99.0, 100.0], "close": [101.0, 102.0],
+                                 "volume": [1000.0, 2000.0]})
+
+    monkeypatch.setattr(ad, "AlpacaData", FakeAD)
+    ds = DataSource(data=tmp_path)
+    assert ds.bars() is None and ds.chart_source == "loading"
+    for _ in range(50):
+        _t.sleep(0.1)
+        b = ds.bars()
+        if b:
+            break
+    assert b and ds.chart_source == "alpaca"
+    aaa = b["symbols"]["AAA"]
+    assert len(aaa["bars"]) == 2 and abs(aaa["prev_close"] - 100.0) < 1e-6 and len(aaa["vwap"]) == 2
+    assert (st / "bars-2026-10-22.json").exists()

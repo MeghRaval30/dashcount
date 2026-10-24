@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sys
+import threading
 import time
 from pathlib import Path
+
+log = logging.getLogger(__name__)
 
 
 def project_root() -> Path:
@@ -44,6 +48,9 @@ class DataSource:
         self._snap_mtime = 0.0
         self._bars = None
         self._bars_mtime = 0.0
+        self._fallback: dict = {}          # (day, symbols) -> bars dict fetched from Alpaca
+        self._fetching: set = set()
+        self.chart_source = "none"
         self._jfile: Path | None = None
         self._joff = 0
 
@@ -60,8 +67,8 @@ class DataSource:
                 self._snap, self._snap_mtime = s, m
         return self._snap
 
-    def bars(self) -> dict | None:
-        """Today's minute bars per symbol (written by the bot every ~15 s)."""
+    def live_bars(self) -> dict | None:
+        """Minute bars written by the running bot (every ~15 s)."""
         p = self.state / "live_bars.json"
         try:
             m = p.stat().st_mtime
@@ -72,6 +79,70 @@ class DataSource:
             if b is not None:
                 self._bars, self._bars_mtime = b, m
         return self._bars
+
+    def bars(self) -> dict | None:
+        """Bars for the day on screen: the bot's own when it saved them, otherwise
+        that session's minute bars fetched once from Alpaca (read-only) and cached."""
+        snap = self.snapshot() or {}
+        day = snap.get("day")
+        live = self.live_bars()
+        if live and (day is None or live.get("day") == day):
+            self.chart_source = "bot"
+            return live
+        syms = [s["symbol"] for s in snap.get("symbols") or []]
+        if not day or not syms:
+            return None
+        key = (day, tuple(syms))
+        if key in self._fallback:
+            self.chart_source = "alpaca"
+            return self._fallback[key]
+        cache = self.state / f"bars-{day}.json"
+        cached = _read_json(cache)
+        if cached and set(syms) <= set(cached.get("symbols", {})):
+            self._fallback[key] = cached
+            self.chart_source = "alpaca"
+            return cached
+        if key not in self._fetching:
+            self._fetching.add(key)
+            prev = {s["symbol"]: (s["price"] / (1 + s["change_pct"] / 100))
+                    for s in snap.get("symbols") or [] if s.get("price") and s.get("change_pct") is not None}
+            threading.Thread(target=self._fetch, args=(key, day, syms, prev, cache), daemon=True).start()
+        self.chart_source = "loading"
+        return None
+
+    def _fetch(self, key, day: str, syms: list[str], prev: dict, cache: Path) -> None:
+        try:
+            import datetime as dt
+
+            from dotenv import load_dotenv
+
+            load_dotenv(self.root / ".env")
+            from dashcount.data.alpaca_data import AlpacaData
+            from dashcount.timeutil import calendar
+
+            s = calendar().session(dt.date.fromisoformat(day))
+            df = AlpacaData(per_minute=60).minutes(syms, s.open, s.close, "sip")
+            out = {}
+            for sym, g in df.sort_values("ts").groupby("symbol"):
+                pv = v = 0.0
+                rows, vw = [], []
+                for r in g.itertuples(index=False):
+                    rows.append([float(r.ts), float(r.open), float(r.high), float(r.low), float(r.close), float(r.volume)])
+                    pv += (r.high + r.low + r.close) / 3 * r.volume
+                    v += r.volume
+                    vw.append(round(pv / v, 4) if v else float(r.close))
+                out[sym] = {"prev_close": prev.get(sym), "bars": rows, "vwap": vw}
+            data = {"ts": time.time(), "day": day, "open": s.open, "close": s.close, "symbols": out, "source": "alpaca"}
+            self._fallback[key] = data
+            try:
+                cache.write_text(json.dumps(data), encoding="utf-8")
+            except OSError:
+                pass
+        except Exception as e:                      # no keys / offline: charts just stay empty
+            log.warning("chart bars unavailable: %s", e)
+            self._fallback[key] = None
+        finally:
+            self._fetching.discard(key)
 
     def snapshot_age(self) -> float | None:
         return time.time() - self._snap_mtime if self._snap_mtime else None
