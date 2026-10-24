@@ -94,3 +94,29 @@ def test_est_spread_iex_uses_nbbo_model_and_sip_uses_quote():
     sip = SymbolState(WatchItem("X"), c.features, _session().open, "sip")
     sip.on_quote(quote(at("10:00"), 99.0, 101.0, symbol="X"))
     assert sip.est_spread() == 2.0
+
+
+def test_iex_inside_prints_use_the_tick_rule():
+    # real case (MU): IEX book 889.79 / 932.81 (mid 911) while the stock prints ~890
+    sp = SpreadTracker()
+    sp.on_quote(quote(0.0, 889.79, 932.81))
+    tick, mid = FlowCounter(inside_rule="tick"), FlowCounter(inside_rule="mid")
+    for fc in (tick, mid):
+        fc.classify(trade(0.5, 889.90), sp)
+    assert tick.classify(trade(1.0, 890.00), sp) == 1          # an up-tick is a buy
+    assert mid.classify(trade(1.0, 890.00), sp) == -1          # "below IEX's midpoint" called it a sell
+    assert tick.classify(trade(1.5, 932.81), sp) == 1          # at the ask the quote rule still decides
+
+
+def test_iex_state_uses_tick_rule_scaled_atr_and_records_the_other_count():
+    from dashcount.features import SymbolState
+    from dashcount.models import WatchItem
+    from helpers import cfg as _cfg, session as _session
+
+    c = _cfg()
+    iex = SymbolState(WatchItem("X"), c.features, _session().open, "iex")
+    sip = SymbolState(WatchItem("X"), c.features, _session().open, "sip")
+    assert (iex.flow.inside_rule, iex.flow_alt.inside_rule, iex.bars.range_scale) == ("tick", "mid", 1.3)
+    assert (sip.flow.inside_rule, sip.flow_alt.inside_rule, sip.bars.range_scale) == ("mid", "tick", 1.0)
+    feed_minutes(iex, at("09:30"), [(100, 101, 99, 100)] * 20)
+    assert 2.5 < iex.bars.atr < 2.7                             # 2.0 real-range ATR x 1.3

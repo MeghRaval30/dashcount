@@ -22,9 +22,10 @@ class BarSeries:
     """Builds 1-minute bars from trades. Bars are closed by the engine's clock,
     so a minute with no trades still produces a (zero-volume) bar."""
 
-    def __init__(self, symbol: str, atr_period: int = 14) -> None:
+    def __init__(self, symbol: str, atr_period: int = 14, range_scale: float = 1.0) -> None:
         self.symbol = symbol
         self.atr_period = atr_period
+        self.range_scale = range_scale     # >1 when the feed's prints miss part of the real range (IEX)
         self.bars: list[Bar] = []          # today's completed bars
         self.vwaps: list[float] = []       # session VWAP at each bar close
         self.history: list[Bar] = []       # previous session(s), for Kronos context
@@ -114,7 +115,7 @@ class BarSeries:
 
     def _update_atr(self, b: Bar) -> None:
         prev_close = self.bars[-1].close if self.bars else (self.history[-1].close if self.history else b.open)
-        tr = max(b.high - b.low, abs(b.high - prev_close), abs(b.low - prev_close))
+        tr = max(b.high - b.low, abs(b.high - prev_close), abs(b.low - prev_close)) * self.range_scale
         if self.atr is None:
             self.atr = tr if tr > 0 else None
         else:
@@ -195,7 +196,9 @@ class SpreadTracker:
 class FlowCounter:
     """Running count of aggressive buying minus aggressive selling.
 
-    * each trade is signed by the quote rule (tick rule as fallback);
+    * each trade is signed by the quote rule (tick rule as fallback); with
+      inside_rule="tick", prints strictly inside the quote use the tick rule too
+      (IEX: its own book is too wide and lopsided for its midpoint to mean much);
     * running count = signed volume over the last `window_s` seconds;
     * true count (z) = running count / its typical size, where the typical size
       is a bias-corrected session EW RMS (kappa * sqrt(V * s) until ~2 minutes of
@@ -219,6 +222,7 @@ class FlowCounter:
     _n_trades: int = 0
     _vol: float = 0.0
     normal_window_volume: float | None = None   # expected volume in one window (feed-scaled)
+    inside_rule: str = "mid"                    # mid | tick: how to sign prints inside the quote
 
     def classify(self, t: Trade, spread: SpreadTracker | None) -> int:
         sign = 0
@@ -227,7 +231,7 @@ class FlowCounter:
                 sign = 1
             elif t.price <= spread.bid:
                 sign = -1
-            else:
+            elif self.inside_rule == "mid":
                 mid = (spread.ask + spread.bid) / 2
                 sign = 1 if t.price > mid else (-1 if t.price < mid else 0)
         if sign == 0:
@@ -311,15 +315,24 @@ class SymbolState:
         self.symbol = item.symbol
         self.feed = feed
         self.session_open = session_open
-        self.bars = BarSeries(item.symbol, f.atr_1m_period)
+        iex = feed == "iex"
+        self.bars = BarSeries(item.symbol, f.atr_1m_period, getattr(f, "iex_atr_scale", 1.0) if iex else 1.0)
         self.spread = SpreadTracker(window_s=f.spread_median_window_min * 60)
-        self.flow = FlowCounter(
-            window_s=f.count_window_s,
-            sample_every_s=f.count_sample_every_s,
-            halflife_s=f.count_halflife_min * 60,
-            kappa=f.count_prior_kappa,
-            quote_fresh_s=f.quote_fresh_s,
-        )
+        inside = getattr(f, "iex_inside_rule", "mid") if iex else "mid"
+
+        def counter(rule: str) -> FlowCounter:
+            return FlowCounter(
+                window_s=f.count_window_s,
+                sample_every_s=f.count_sample_every_s,
+                halflife_s=f.count_halflife_min * 60,
+                kappa=f.count_prior_kappa,
+                quote_fresh_s=f.quote_fresh_s,
+                inside_rule=rule,
+            )
+
+        self.flow = counter(inside)
+        # the other signing rule: recorded, never traded on, so runs can compare the two
+        self.flow_alt = counter("mid" if inside == "tick" else "tick")
         self.last_trade_ts = 0.0
         self.last_price: float | None = None
         self.pad_state: dict = {}
@@ -347,12 +360,14 @@ class SymbolState:
         m = self.normal_minute_volume(ts)
         if m is not None:
             self.flow.normal_window_volume = m * self.flow.window_s / 60.0
+            self.flow_alt.normal_window_volume = self.flow.normal_window_volume
 
     # events -----------------------------------------------------------------
     def on_trade(self, t: Trade) -> int:
         self.last_trade_ts = t.ts
         self.last_price = t.price
         self.bars.on_trade(t)
+        self.flow_alt.on_trade(t, self.spread)
         return self.flow.on_trade(t, self.spread)
 
     def on_quote(self, q: Quote) -> None:
@@ -362,10 +377,14 @@ class SymbolState:
         bar = self.bars.close_bar(next_start)
         self._update_normal_window(next_start)
         self.flow.maybe_sample(next_start)
+        self.flow_alt.maybe_sample(next_start)
         return bar
 
     def z(self, now: float) -> float:
         return self.flow.z(now)
+
+    def z_alt(self, now: float) -> float:
+        return self.flow_alt.z(now)
 
     def nbbo_bps(self) -> float:
         return self.item.nbbo_spread_bps or self.default_nbbo_bps

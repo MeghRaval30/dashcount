@@ -48,6 +48,15 @@ features:
   default_nbbo_bps: 8.0
   spread_sample_windows: ["09:50", "11:00", "14:00"]
   spread_sample_minutes: 2
+  # 96% of IEX prints fall inside IEX's own book, whose midpoint sits a median
+  # 41 bps from the trade (real spread ~8 bps). Signing them against that
+  # midpoint gave a count unrelated even to the price move it should explain,
+  # so on IEX they are signed by the tick rule ("mid" = classic quote rule).
+  # The other rule's count is still recorded (stock_z_alt / tc_alt) to compare.
+  iex_inside_rule: tick
+  # IEX-built 1-minute bars cover ~77% of the real high-low range (70 stock-days),
+  # so ATR1m on IEX is scaled up to match the stock's real 1-minute range.
+  iex_atr_scale: 1.3
 
 pads:
   orb:

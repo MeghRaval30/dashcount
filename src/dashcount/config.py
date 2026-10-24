@@ -61,6 +61,8 @@ class FeaturesCfg(BaseModel):
     default_nbbo_bps: float = 8.0
     spread_sample_windows: list[str] = ["09:50", "11:00", "14:00"]
     spread_sample_minutes: int = 2
+    iex_inside_rule: str = "tick"
+    iex_atr_scale: float = 1.3
 
 
 class OrbCfg(BaseModel):
