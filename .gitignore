@@ -6,13 +6,13 @@ __pycache__/
 *.pyc
 .pytest_cache/
 # data, models, runtime state
-data/
-models/
-logs/
-reports/
+/data/
+/models/
+/logs/
+/reports/
 *.gguf
 
 # build outputs
-build/
-dist/
+/build/
+/dist/
 *.spec
