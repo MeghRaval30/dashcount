@@ -200,26 +200,14 @@ def cmd_guardian(args, cfg) -> int:
     return 0
 
 
-def _ollama_up(url: str) -> bool:
-    import httpx
-
-    try:
-        return httpx.get(url + "/api/version", timeout=2).status_code == 200
-    except Exception:
-        return False
-
-
 def cmd_run_day(args, cfg) -> int:
     """Start everything for today: Ollama (if needed), the Guardian, then the bot."""
     log = logging.getLogger("run-day")
-    if args.vetoes in ("full", "finr1") and not _ollama_up(cfg.veto.finr1.ollama_url):
-        log.info("starting Ollama")
-        subprocess.Popen(["ollama", "serve"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-        for _ in range(30):
-            if _ollama_up(cfg.veto.finr1.ollama_url):
-                break
-            time.sleep(1)
+    if args.vetoes in ("full", "finr1"):
+        from .factory import ensure_ollama
+
+        if not ensure_ollama(cfg.veto.finr1.ollama_url):
+            log.warning("Ollama did not start: Fin-R1 will answer 'unavailable' and trades will be skipped")
     gargs = [sys.executable, "-m", "dashcount.cli"]
     if args.config:
         gargs += ["--config", args.config]

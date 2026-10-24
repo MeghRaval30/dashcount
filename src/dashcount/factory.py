@@ -21,6 +21,37 @@ def records_root() -> Path:
     return data_dir() / "records"
 
 
+def ollama_up(url: str) -> bool:
+    import httpx
+
+    try:
+        return httpx.get(url.rstrip("/") + "/api/version", timeout=2).status_code == 200
+    except Exception:
+        return False
+
+
+def ensure_ollama(url: str, wait_s: float = 30.0) -> bool:
+    """Start `ollama serve` in the background if it isn't running (Fin-R1 lives there)."""
+    import subprocess
+    import time
+
+    if ollama_up(url):
+        return True
+    log.info("starting Ollama for Fin-R1")
+    try:
+        subprocess.Popen(["ollama", "serve"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except FileNotFoundError:
+        log.warning("Ollama is not installed or not on PATH")
+        return False
+    t_end = time.time() + wait_s
+    while time.time() < t_end:
+        if ollama_up(url):
+            return True
+        time.sleep(1)
+    return False
+
+
 def make_chain(cfg: Config, vetoes: str = "full", preload: bool = True) -> VetoChain | None:
     if vetoes == "none":
         return None
@@ -31,6 +62,8 @@ def make_chain(cfg: Config, vetoes: str = "full", preload: bool = True) -> VetoC
     if kronos is not None and preload:
         _ = kronos.predictor            # load the weights now, not inside a timed decision
     finr1 = FinR1Veto(cfg.veto.finr1) if vetoes in ("full", "finr1") else None
+    if finr1 is not None:
+        ensure_ollama(cfg.veto.finr1.ollama_url)
     if finr1 is not None and not finr1.available():
         log.warning("Fin-R1 is not available in Ollama (%s); it will answer 'unavailable' -> trades skipped. "
                     "Start Ollama or use --vetoes kronos.", cfg.veto.finr1.model)
