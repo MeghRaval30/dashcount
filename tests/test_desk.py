@@ -119,3 +119,82 @@ def test_reconciler_grace_and_reset():
     assert r.update(set(), set(), 40.0) == []
     assert r.update(set(), {"BBB"}, 41.0) == []
     assert r.update(set(), {"BBB"}, 72.0) == ["BBB: the bot has a trade but the broker has no position"]
+
+
+# ------------------------------------------------------------------ broker feed
+NOW = 1_793_025_000.0          # 2026-10-26 14:30 UTC (10:30 New York)
+
+
+def _feed(handler, session=lambda: (NOW - 600, NOW + 3600)):
+    import httpx
+
+    from dashcount_ui.broker_feed import BrokerFeed
+
+    client = httpx.Client(base_url="https://paper-api.alpaca.markets", transport=httpx.MockTransport(handler))
+    return BrokerFeed("k", "s", client=client, clock=lambda: NOW, session=session)
+
+
+def test_feed_polls_orders_and_positions_read_only():
+    import httpx
+
+    seen = []
+
+    def handler(req):
+        seen.append((req.method, req.url.path, dict(req.url.params)))
+        if req.url.path == "/v2/orders":
+            return httpx.Response(200, json=[{"id": "o1", "symbol": "AAA"}])
+        return httpx.Response(200, json=[{"symbol": "AAA", "qty": "10"}])
+
+    f = _feed(handler)
+    assert f.poll_once() == 10.0
+    assert {m for m, _, _ in seen} == {"GET"} and {p for _, p, _ in seen} == {"/v2/orders", "/v2/positions"}
+    params = next(p for _, path, p in seen if path == "/v2/orders")
+    assert params["status"] == "all" and params["nested"] == "true" and params["direction"] == "asc"
+    assert params["after"].startswith("2026-10-26T00:00:00")
+    st = f.state()
+    assert st.configured and st.ok and len(st.orders) == 1 and len(st.positions) == 1
+    assert st.last_latency_ms is not None and st.errors_10min == 0
+
+
+def test_feed_backoff_and_rate_limit():
+    import httpx
+
+    replies = [httpx.Response(500), httpx.Response(500),
+               httpx.Response(429, headers={"X-RateLimit-Reset": str(int(NOW + 7))}),
+               httpx.Response(200, json=[])]
+
+    def handler(req):
+        if req.url.path == "/v2/positions":
+            return httpx.Response(200, json=[])
+        return replies.pop(0)
+
+    f = _feed(handler)
+    assert f.poll_once() == 30.0 and f.state().errors_10min == 1 and not f.state().ok
+    assert f.poll_once() == 60.0
+    assert f.poll_once() == pytest.approx(7.0, abs=1.0)
+    assert f.poll_once() == 10.0 and f.state().ok
+
+
+def test_feed_outside_session_polls_every_5_minutes():
+    import httpx
+
+    f = _feed(lambda req: httpx.Response(200, json=[]), session=lambda: (NOW + 20_000, NOW + 40_000))
+    assert f.poll_once() == 300.0
+
+
+def test_feed_from_env_without_keys(tmp_path, monkeypatch):
+    from dashcount_ui.broker_feed import feed_from_env
+
+    monkeypatch.delenv("ALPACA_API_KEY", raising=False)
+    monkeypatch.delenv("ALPACA_SECRET_KEY", raising=False)
+    assert feed_from_env(tmp_path, lambda: None) is None
+
+
+def test_demo_feed_has_orders():
+    from dashcount_ui.broker_feed import DemoFeed
+
+    journal = [{"kind": "taken", "ts": NOW, "symbol": "AAA", "trade_id": "dc-1-1", "entry": 12.5, "stop": 12.0,
+                "target": 13.5, "qty": 10, "direction": 1}]
+    st = DemoFeed({"trades": [{"symbol": "AAA", "qty": 10, "direction": 1}]}, journal).state()
+    assert st.configured and st.ok and st.orders and st.orders[0]["client_order_id"] == "dc-1-1"
+    assert st.positions == [{"symbol": "AAA", "qty": "10"}]
