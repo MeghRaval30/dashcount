@@ -41,6 +41,7 @@ class AlertInputs:
     ollama_up: bool | None
     guardian: dict
     day: str
+    bot_expected: bool | None = None   # None: same as in_session (the bot isn't expected after the close)
 
 
 class AlertEngine:
@@ -123,14 +124,17 @@ class AlertEngine:
         if x.streak_limit > 1 and x.losers_in_row == x.streak_limit - 1:
             conds.append(("streak_3", "streak_3", "warn",
                           f"{x.losers_in_row} losing trades in a row: one more halts the day"))
-        if x.in_session and (x.heartbeat_age is None or x.heartbeat_age > SILENT_S):
+        expected = x.in_session if x.bot_expected is None else x.bot_expected
+        if expected and (x.heartbeat_age is None or x.heartbeat_age > SILENT_S):
             conds.append(("bot_silent", "bot_silent", "danger",
                           "The bot is not running" if x.heartbeat_age is None
                           else f"The bot has been silent for {x.heartbeat_age:.0f} s"))
         for sym in x.held_stale:
             conds.append((f"data_stale_held:{sym}", "data_stale_held", "danger",
                           f"No data for {sym} (held) for over 3 minutes"))
-        if x.alpaca_errors_10min >= 3 and not x.alpaca_ok:
+        # one alert per bad patch: it re-arms only once the errors have aged out of the
+        # 10-minute window, not on the first good call of a flaky connection
+        if x.alpaca_errors_10min >= 3:
             conds.append(("alpaca_errors", "alpaca_errors", "warn", f"Alpaca errors: {x.alpaca_errors_10min} in 10 minutes"))
         for msg in x.mismatches:
             conds.append((f"mismatch:{msg}", "mismatch", "danger", msg))

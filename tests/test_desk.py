@@ -111,14 +111,55 @@ def test_foreign_and_partial_orders():
 
 
 def test_reconciler_grace_and_reset():
+    # grace > entry timeout (30 s) + one poll (10 s) + the bot's write lag: an entry that
+    # never fills is cancelled before it can look like a mismatch
     from dashcount_ui.reconcile import Reconciler
 
     r = Reconciler()
     assert r.update({"AAA"}, set(), 0.0) == []
-    assert r.update({"AAA"}, set(), 31.0) == ["AAA: held at the broker but unknown to the bot"]
-    assert r.update(set(), set(), 40.0) == []
-    assert r.update(set(), {"BBB"}, 41.0) == []
-    assert r.update(set(), {"BBB"}, 72.0) == ["BBB: the bot has a trade but the broker has no position"]
+    assert r.update({"AAA"}, set(), 35.0) == []
+    assert r.update({"AAA"}, set(), 61.0) == ["AAA: held at the broker but unknown to the bot"]
+    assert r.update(set(), set(), 70.0) == []
+    assert r.update(set(), {"BBB"}, 71.0) == []
+    assert r.update(set(), {"BBB"}, 132.0) == ["BBB: the bot has a trade but the broker has no position"]
+
+
+def test_pending_entries_are_not_positions():
+    from dashcount_ui.reconcile import bot_held_symbols
+
+    snap = {"trades": [{"symbol": "A", "state": "pending"}, {"symbol": "B", "state": "open"},
+                       {"symbol": "C", "state": "closing"}, {"symbol": "D"}]}
+    assert bot_held_symbols(snap) == {"B", "C", "D"}
+
+
+def test_reconcile_only_with_fresh_data():
+    from dashcount_ui.broker_feed import FeedState
+    from dashcount_ui.reconcile import should_reconcile
+
+    fresh = FeedState(True, True, [], [], NOW - 5, 300.0, 0, "")
+    assert should_reconcile(fresh, 3.0, NOW)
+    assert not should_reconcile(FeedState(True, True, [], [], NOW - 40, 300.0, 0, ""), 3.0, NOW)   # old positions
+    assert not should_reconcile(fresh, 120.0, NOW)                                                # old bot view
+    assert not should_reconcile(FeedState(True, False, [], [], NOW - 5, 300.0, 1, "x"), 3.0, NOW)
+    assert not should_reconcile(None, 3.0, NOW) and not should_reconcile(fresh, None, NOW)
+
+
+def test_checkpoint_oco_attaches_to_its_entry():
+    # at +1R the bot cancels the bracket legs and sends an OCO (limit target + moved stop)
+    from dashcount_ui.reconcile import blotter_rows
+
+    plans = {"dc-1-1": {"entry": 100.0, "stop": 99.0, "target": 102.0, "qty": 10, "direction": 1}}
+    legs = [_order("tp", "x1", "AAA", "sell", "limit", 10, 0, None, "canceled", "2026-10-26T14:30:00Z", limit=102.0),
+            _order("sl", "x2", "AAA", "sell", "stop", 10, 0, None, "canceled", "2026-10-26T14:30:00Z", stop=99.0)]
+    entry = dict(_order("e1", "dc-1-1", "AAA", "buy", "limit", 10, 10, 100.05, "filled", "2026-10-26T14:30:00Z",
+                        limit=100.1, legs=legs), order_class="bracket")
+    oco_leg = _order("o1s", "y2", "AAA", "sell", "stop", 10, 10, 99.95, "filled", "2026-10-26T14:50:00Z", stop=100.0)
+    oco = dict(_order("o1", "y1", "AAA", "sell", "limit", 10, 0, None, "canceled", "2026-10-26T14:50:00Z",
+                      limit=102.0, legs=[oco_leg]), order_class="oco")
+    rows = blotter_rows([entry, oco], plans)
+    assert [r.role for r in rows] == ["ENTRY", "TARGET", "STOP", "TARGET", "STOP"]
+    assert {r.trade_id for r in rows} == {"dc-1-1"} and {r.parent_id for r in rows[1:]} == {"e1"}
+    assert rows[4].slip == pytest.approx(0.05) and rows[4].slip_r == pytest.approx(0.05)
 
 
 # ------------------------------------------------------------------ broker feed
@@ -407,3 +448,97 @@ def test_blotter_shows_whole_groups_when_cut():
     assert visible_rows(rows, 4, lambda r: r[1]) == [("e2", False), ("t2", True), ("s2", True)]
     assert visible_rows(rows, 10, lambda r: r[1]) == rows
     assert visible_rows([("t", True), ("s", True)], 1, lambda r: r[1]) == [("s", True)]   # nothing whole fits
+
+
+# ------------------------------------------------------------------ final review fixes
+def test_feed_polls_early_when_the_session_starts():
+    import httpx
+
+    window = {"s": (NOW + 20_000, NOW + 40_000)}
+    f = _feed(lambda req: httpx.Response(200, json=[]), session=lambda: window["s"])
+    assert f.poll_once() == 300.0 and f.due_in() == pytest.approx(300.0)
+    window["s"] = (NOW - 600, NOW + 3600)                        # the app learnt today's session
+    assert f.due_in() == 0.0
+
+
+O, C = NOW - 3600, NOW + 5 * 3600                                # a session around NOW
+
+
+def test_session_state_windows():
+    from dashcount_ui.health import session_state
+
+    st = session_state(O - 40 * 60, (O, C), None)
+    assert (st.in_session, st.bot_expected, st.guardian_expected) == (False, False, False)
+    st = session_state(O - 20 * 60, (O, C), None)
+    assert (st.in_session, st.bot_expected, st.guardian_expected) == (True, True, False)
+    st = session_state(O + 3600, (O, C), {"status": "trading", "ts": O + 3590})
+    assert (st.in_session, st.bot_expected, st.guardian_expected, st.bot_done) == (True, True, True, False)
+    st = session_state(C + 5 * 60, (O, C), {"status": "trading", "ts": C})
+    assert (st.in_session, st.bot_expected, st.guardian_expected) == (True, False, True)
+    st = session_state(C + 20 * 60, (O, C), None)
+    assert (st.in_session, st.guardian_expected) == (True, False)
+    done = session_state(O + 3600, (O, C), {"status": "done", "ts": O + 3000})      # STOP pressed
+    assert done.bot_done and not done.bot_expected
+    assert session_state(NOW, None, None) == session_state(NOW, None, {"status": "trading", "ts": NOW})
+    assert not session_state(NOW, None, None).in_session
+
+
+def test_today_session_from_the_exchange_calendar():
+    import datetime as dt
+
+    from dashcount_ui.health import today_session
+
+    s = today_session(NOW)                                       # Monday 26 Oct 2026, 10:30 New York
+    assert s is not None
+    assert dt.datetime.fromtimestamp(s[0], tz=dt.timezone.utc).strftime("%H:%M") == "13:30"
+    assert today_session(NOW - 2 * 86400) is None                # Saturday
+
+
+def test_finished_bot_and_closed_guardian_are_idle_not_red():
+    r = _rows(heartbeat_age=200.0, bot_done=True, guardian_age=900.0, guardian_expected=False)
+    assert r["bot"].level == "idle" and r["bot"].text == "day finished"
+    assert r["guardian"].level == "idle"
+
+
+def test_ages_read_naturally():
+    assert _rows(heartbeat_age=298080.0, in_session=False)["bot"].text == "3 days ago"
+    assert _rows(heartbeat_age=5.0)["bot"].text == "5 s ago"
+
+
+def test_market_data_is_idle_without_fresh_data():
+    snap = {"symbols": [{"symbol": "A", "last_trade_age": 10.0}]}
+    assert _rows(snap=snap, snapshot_age=298080.0)["data"].level == "idle"
+    assert _rows(snap=snap, in_session=False)["data"].level == "idle"
+    assert _rows(snap={"symbols": [{"symbol": "A", "last_trade_age": 100.0}]}, snapshot_age=85.0)["data"].level == "warn"
+
+
+def test_bot_silent_only_when_the_bot_is_expected(tmp_path):
+    from dashcount_ui.alerts import AlertEngine
+
+    eng = AlertEngine(tmp_path)
+    eng.start_day(DAY)
+    assert eng.evaluate(NOW, _inputs(heartbeat_age=200.0, bot_expected=False)) == []          # after the close
+    assert [a.id for a in eng.evaluate(NOW, _inputs(heartbeat_age=200.0, bot_expected=True))] == ["bot_silent"]
+
+
+def test_alpaca_errors_do_not_repeat_on_a_flaky_link(tmp_path):
+    from dashcount_ui.alerts import AlertEngine
+
+    eng = AlertEngine(tmp_path)
+    eng.start_day(DAY)
+
+    def ids(n, ok):
+        return [a.id for a in eng.evaluate(NOW, _inputs(alpaca_errors_10min=n, alpaca_ok=ok))]
+
+    assert ids(3, False) == ["alpaca_errors"]
+    assert ids(3, True) == [] and ids(4, False) == []            # still inside the same bad 10 minutes
+    assert ids(0, True) == [] and ids(3, False) == ["alpaca_errors"]
+
+
+def test_meters_fit_the_panel():
+    from dashcount_ui.desk import meter_step
+
+    for h in (220, 250, 316, 400):
+        avail = h - 22                                           # with the "bot last seen" line
+        assert 5 * meter_step(avail, 5) <= avail and meter_step(avail, 5) >= 36
+    assert meter_step(1000, 5) == 58

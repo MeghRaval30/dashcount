@@ -77,9 +77,23 @@ class BrokerFeed:
         self._fails = 0
         self._set(ok=True, orders=orders, positions=positions, last_ok_ts=now,
                   last_latency_ms=(time.perf_counter() - t0) * 1000, last_error="")
+        return self._due(IN_SESSION_S if self._in_session(now) else IDLE_S)
+
+    def _in_session(self, now: float) -> bool:
         s = self.session()
-        in_session = bool(s) and s[0] - SESSION_MARGIN_S <= now <= s[1] + SESSION_MARGIN_S
-        return IN_SESSION_S if in_session else IDLE_S
+        return bool(s) and s[0] - SESSION_MARGIN_S <= now <= s[1] + SESSION_MARGIN_S
+
+    def _due(self, wait: float) -> float:
+        self._next_due = self.clock() + wait
+        return wait
+
+    def due_in(self) -> float:
+        """Seconds until the next poll; at once if the session started during a long idle wait."""
+        now = self.clock()
+        left = getattr(self, "_next_due", now) - now
+        if left > IN_SESSION_S and self._in_session(now):
+            return 0.0
+        return max(left, 0.0)
 
     def _fail(self, msg: str, resp: httpx.Response | None) -> float:
         now = self.clock()
@@ -88,8 +102,8 @@ class BrokerFeed:
         self._set(ok=False, last_error=msg[:200])
         if resp is not None and resp.status_code == 429:
             reset = float(resp.headers.get("X-RateLimit-Reset") or now + 5)
-            return max(reset - now, 1.0)
-        return BACKOFF_S[0] if self._fails == 1 else BACKOFF_S[1]
+            return self._due(max(reset - now, 1.0))
+        return self._due(BACKOFF_S[0] if self._fails == 1 else BACKOFF_S[1])
 
     def _set(self, **kw) -> None:
         now = self.clock()
@@ -109,7 +123,10 @@ class BrokerFeed:
 
         def loop() -> None:
             while not self._stop.is_set():
-                self._stop.wait(self.poll_once())      # returns at once when stop() is called
+                self.poll_once()
+                # wake at least every 30 s, so the start of the session is noticed quickly
+                while not self._stop.is_set() and (left := self.due_in()) > 0:
+                    self._stop.wait(min(left, 30.0))     # returns at once when stop() is called
 
         self._thread = threading.Thread(target=loop, daemon=True, name="broker-feed")
         self._thread.start()

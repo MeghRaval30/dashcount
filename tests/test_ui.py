@@ -231,12 +231,23 @@ def test_bot_commands_never_relaunch_the_dashboard(tmp_path, monkeypatch):
         bot_command(tmp_path, "panic")
 
 
-def test_new_day_starts_a_fresh_map_and_journal(tmp_path):
+def test_new_day_starts_a_fresh_map_and_journal(tmp_path, monkeypatch):
     from PySide6.QtWidgets import QApplication
 
+    import dashcount_ui.app as appmod
     from dashcount_ui import pixel as px
     from dashcount_ui.app import MainWindow
     from dashcount_ui.datasource import DataSource
+
+    class NoNetwork:                                     # a real (non-demo) window must not call out in tests
+        def __init__(self, *a, **k):
+            pass
+
+        def check(self):
+            return True, True
+
+    monkeypatch.setattr(appmod, "feed_from_env", lambda *a, **k: None)
+    monkeypatch.setattr(appmod, "OllamaCheck", NoNetwork)
 
     app = QApplication.instance() or QApplication([])
     px.load_fonts()
@@ -340,6 +351,23 @@ def test_alert_badge_counts_while_on_table(demo_dir, tmp_path):
     assert w.tabs.badges.get("desk") == 1
     w.show_screen("desk")
     assert w.tabs.badges.get("desk") == 0
+    w.close()
+
+
+def test_one_failing_desk_input_only_breaks_its_own_panel(demo_dir, monkeypatch):
+    import dashcount_ui.app as appmod
+
+    def boom(*a, **k):
+        raise ValueError("bad budget")
+
+    app, w = _window(demo_dir)
+    monkeypatch.setattr(appmod, "risk_meters", boom)
+    w.refresh()
+    w.show_screen("desk")
+    app.processEvents()
+    w.desk.grab()
+    assert w.desk.panel_errors() == ["RISK METERS"]
+    assert len(w.desk.view.health) == 7                          # the other panels still update
     w.close()
 
 

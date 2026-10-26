@@ -46,6 +46,18 @@ class DeskView:
     alerts: list[Alert]
 
 
+@dataclass(frozen=True)
+class PanelError:
+    """Stands in for a panel's data when building it failed: that panel shows the error."""
+    message: str
+
+
+def meter_step(avail: int, n: int) -> int:
+    """Height per meter: roomy when there is space, compact (label and value on one line)
+    when the panel is short, so every meter stays visible."""
+    return max(36, min(58, avail // max(n, 1)))
+
+
 def visible_rows(rows: list, fit: int, is_leg) -> list:
     """The newest rows that fit, starting at an entry so no stop or target shows without
     its order (falls back to the plain tail when not even one whole group fits)."""
@@ -70,6 +82,11 @@ class _Body(QWidget):
 
     def set(self, **data) -> None:
         self.error = ""
+        failed = next((v for v in data.values() if isinstance(v, PanelError)), None)
+        if failed is not None:
+            self.error = failed.message
+            self.update()
+            return
         try:
             self.data = self.prepare(**data)
         except Exception as e:                 # noqa: BLE001 - a panel must never take the window down
@@ -116,11 +133,18 @@ class RiskBody(_Body):
             p.drawText(0, y + 14, self.data["stale"])
             y += 22
         heart = px.icon_pixmap("heart", 2)
+        step = meter_step(self.height() - y, len(self.data["meters"]))
+        compact = step < 58
         for key, label, frac, level, text, used, limit in self.data["meters"]:
             p.setFont(font_px(8))
             p.setPen(col("gold") if level != "stale" else col("muted"))
             p.drawText(0, y + 10, label)
             bar_y = y + 16
+            if compact:                       # value on the label's line, to the right
+                p.setFont(font_vt(18))
+                p.setPen(col("text") if level != "stale" else col("muted"))
+                p.drawText(QRect(0, y - 4, w, 18), Qt.AlignmentFlag.AlignRight,
+                           p.fontMetrics().elidedText(text, Qt.TextElideMode.ElideRight, int(w * 0.65)))
             if key == "streak":
                 lost = int(round(used))
                 for i in range(int(round(limit))):
@@ -136,10 +160,11 @@ class RiskBody(_Body):
                     p.fillRect(QRect(x, bar_y, bw, 14), col("black"))
                     c = LEVEL_COLOR[level] if i < filled else "deepslate_lo"
                     p.fillRect(QRect(x + 1, bar_y + 1, bw - 2, 12), col(c))
-            p.setFont(font_vt(18))
-            p.setPen(col("text") if level != "stale" else col("muted"))
-            p.drawText(0, bar_y + 32, text)
-            y += 58
+            if not compact:
+                p.setFont(font_vt(18))
+                p.setPen(col("text") if level != "stale" else col("muted"))
+                p.drawText(0, bar_y + 32, text)
+            y += step
 
 
 # ------------------------------------------------------------- orders & fills

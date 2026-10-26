@@ -24,15 +24,15 @@ from . import pixel as px
 from .alerts import AlertEngine, AlertInputs
 from .broker_feed import DemoFeed, feed_from_env
 from .datasource import DataSource, ago, project_root
-from .desk import DeskScreen, DeskView
-from .health import OllamaCheck, health_rows
-from .reconcile import Reconciler, blotter_rows, blotter_summary, plans_from_journal
+from .desk import DeskScreen, DeskView, PanelError
+from .health import OllamaCheck, health_rows, session_state, today_session
+from .reconcile import (Reconciler, blotter_rows, blotter_summary, bot_held_symbols, plans_from_journal,
+                        should_reconcile)
 from .risk import Limits, limits_from_config, risk_meters
 from .sound import Sounds
 
 log = logging.getLogger(__name__)
 ALERT_SOUND = {"warn": "taken", "danger": "panic"}      # trades already have their own journal sounds
-SESSION_MARGIN_S = 1800.0
 from .widgets import (Footer, Header, HotbarButton, InventoryView, JournalView, LevelView, ParchmentPanel, ScreenTabs,
                       PixelPanel, PriceChart, ScoreView, TreasureMap, countdown, money)
 
@@ -241,8 +241,7 @@ class MainWindow(QWidget):
                 self.journal.entries = []
                 self.journal.render()
             self.day = snap["day"]
-        s0 = snap.get("session") or {}
-        self._session = (float(s0["open"]), float(s0["close"])) if s0.get("open") and s0.get("close") else None
+        self._session = self._today_session(time.time(), snap)
 
         new = self.ds.journal_new()
         if new:
@@ -443,7 +442,11 @@ class MainWindow(QWidget):
         self.alert_list: list = []
         self.reconciler = Reconciler()
         self.unread = 0
-        self._session: tuple[float, float] | None = None
+        self._panel_errs: dict[str, str] = {}
+        self._session_day = None
+        self._session_cal: tuple[float, float] | None = None
+        # known before the feed's first poll, so it starts at the right pace
+        self._session: tuple[float, float] | None = self._today_session(time.time(), self.ds.snapshot() or {})
         self._stop = threading.Event()
         if self.demo:
             self.ollama_state: tuple[bool, bool] | None = (True, True)
@@ -479,26 +482,36 @@ class MainWindow(QWidget):
         fresh = self.alerts.from_journal(new, now) if self.alert_day else []
         guardian = self.ds.guardian()
         age = self.ds.snapshot_age()
-        meters = risk_meters(snap, guardian, self.limits, age)
-        feed = self.feed.state() if self.feed is not None else None
-        rows = blotter_rows(feed.orders, plans_from_journal(self.journal.entries)) if feed else []
-        held = {t["symbol"] for t in snap.get("trades") or []}
-        mismatches = []
-        if feed is not None and feed.ok:
-            broker = {p.get("symbol") for p in feed.positions if float(p.get("qty") or 0) != 0}
-            mismatches = self.reconciler.update(broker, held | self.ds.bot_positions(), now)
-        sess = self._session
-        in_session = bool(sess) and sess[0] - SESSION_MARGIN_S <= now <= sess[1] + SESSION_MARGIN_S
-        quiet = {s["symbol"] for s in snap.get("symbols") or [] if (s.get("last_trade_age") or 0) > 180}
         hb = self.ds.heartbeat_age()
-        health = health_rows(in_session=in_session, heartbeat_age=hb, guardian_age=self.ds.guardian_age(), snap=snap,
-                             held=held, feed=feed, ollama=self.ollama_state, timeouts=self.veto_timeouts, now=now)
+        state = session_state(now, self._session, self.ds.heartbeat())
+        feed = self.feed.state() if self.feed is not None else None
+        # each panel's input is built on its own: one bad value breaks one panel, not the DESK
+        meters = self._panel("RISK METERS", lambda: risk_meters(snap, guardian, self.limits, age))
+        rows = self._panel("ORDERS & FILLS", lambda: blotter_rows(feed.orders, plans_from_journal(self.journal.entries))
+                           if feed else [])
+        held = bot_held_symbols(snap)
+        mismatches = []
+        if should_reconcile(feed, age, now):
+            broker = {p.get("symbol") for p in feed.positions if float(p.get("qty") or 0) != 0}
+            mismatches = self.reconciler.update(broker, held, now)
+        fresh_snap = age is not None and age <= 90
+        quiet = {s["symbol"] for s in snap.get("symbols") or []
+                 if fresh_snap and (s.get("last_trade_age") or 0) + age > 180}
+        health = self._panel("SYSTEM HEALTH", lambda: health_rows(
+            in_session=state.in_session, heartbeat_age=hb, guardian_age=self.ds.guardian_age(), snap=snap, held=held,
+            feed=feed, ollama=self.ollama_state, timeouts=self.veto_timeouts, now=now,
+            bot_expected=state.bot_expected, guardian_expected=state.guardian_expected, bot_done=state.bot_done,
+            snapshot_age=age))
         if self.alert_day:
-            fresh += self.alerts.evaluate(now, AlertInputs(
-                in_session, meters, int(guardian.get("losers_in_row") or 0), self.limits.losers_in_row, hb,
-                sorted(held & quiet), [r for r in rows if r.status == "rejected"],
+            added = self._panel("ALERTS", lambda: self.alerts.evaluate(now, AlertInputs(
+                state.in_session, meters if isinstance(meters, list) else [], int(guardian.get("losers_in_row") or 0),
+                self.limits.losers_in_row, hb, sorted(held & quiet),
+                [r for r in rows if r.status == "rejected"] if isinstance(rows, list) else [],
                 feed.errors_10min if feed else 0, bool(feed and feed.ok), mismatches,
-                self.ollama_state[0] if self.ollama_state else None, guardian, self.alert_day))
+                self.ollama_state[0] if self.ollama_state else None, guardian, self.alert_day,
+                bot_expected=state.bot_expected)))
+            if isinstance(added, list):
+                fresh += added
         if fresh:
             self.alert_list = sorted(fresh + self.alert_list, key=lambda a: -a.ts)[:200]
             if self.stack.currentWidget() is not self.desk:
@@ -508,8 +521,37 @@ class MainWindow(QWidget):
             if worst in ALERT_SOUND:
                 self.sounds.play(ALERT_SOUND[worst])
         stale = ("bot has not run here yet" if age is None else f"bot last seen {ago(age)} ago" if age > 90 else "")
-        self.desk.show_view(DeskView(meters, stale, rows, blotter_summary(rows), feed, mismatches, health,
+        summary = blotter_summary(rows) if isinstance(rows, list) else rows
+        self.desk.show_view(DeskView(meters, stale, rows, summary, feed, mismatches, health,
                                      self.alert_list))
+
+    def _panel(self, name: str, build):
+        """Build one panel's input; on failure that panel shows the error (logged once per new error)."""
+        try:
+            value = build()
+            self._panel_errs.pop(name, None)
+            return value
+        except Exception as e:                  # noqa: BLE001
+            msg = f"{type(e).__name__}: {e}"
+            if self._panel_errs.get(name) != msg:
+                log.exception("DESK %s failed", name)
+                self._panel_errs[name] = msg
+            return PanelError(msg)
+
+    def _today_session(self, now: float, snap: dict) -> tuple[float, float] | None:
+        """Today's session from the exchange calendar, so the DESK knows the market is open
+        even when the bot never started (the bot's snapshot is the fallback)."""
+        day = dt.datetime.fromtimestamp(now, ET).date()
+        if day != self._session_day:
+            try:
+                self._session_cal = today_session(now)
+            except Exception:                   # noqa: BLE001
+                log.exception("exchange calendar unavailable")
+                s0 = snap.get("session") or {}
+                self._session_cal = ((float(s0["open"]), float(s0["close"]))
+                                     if s0.get("open") and s0.get("close") else None)
+            self._session_day = day
+        return self._session_cal
 
     def show_screen(self, key: str) -> None:
         self.stack.setCurrentWidget(self.screens[key])

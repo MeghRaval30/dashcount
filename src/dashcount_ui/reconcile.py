@@ -68,18 +68,29 @@ def _row(o: dict, role: str, parent: str | None, trade_id: str | None, plan: dic
                       str(o.get("status", "")), fill, slip, slip_r, trade_id)
 
 
+def _role(o: dict) -> str:
+    return "STOP" if o.get("type") in ("stop", "stop_limit") else "TARGET"
+
+
 def blotter_rows(orders: list[dict], plans: dict[str, dict]) -> list[BlotterRow]:
     groups: list[list[BlotterRow]] = []          # an entry, its legs, then any later exits
     last_entry: dict[str, list[BlotterRow]] = {}
     for o in sorted(orders, key=lambda o: _ts(o.get("submitted_at"))):
         legs = o.get("legs") or []
         is_exit = not legs and o.get("type") == "market"
-        if is_exit and o.get("symbol") in last_entry:
+        # at +1R (or after a partial fill) the bot replaces the bracket legs with an OCO:
+        # a limit target plus a stop leg. Those belong to the trade, not a new entry.
+        is_oco = o.get("order_class") == "oco"
+        if (is_exit or is_oco) and o.get("symbol") in last_entry:
             g = last_entry[o["symbol"]]
             e = g[0]
             plan = plans.get(e.trade_id) if e.trade_id else None
             d = int((plan or {}).get("direction") or (1 if e.side == "BUY" else -1))
-            g.append(_row(o, "EXIT", e.order_id, e.trade_id, plan, d))
+            if is_exit:
+                g.append(_row(o, "EXIT", e.order_id, e.trade_id, plan, d))
+            else:
+                g.append(_row(o, _role(o), e.order_id, e.trade_id, plan, d))
+                g.extend(_row(leg, _role(leg), e.order_id, e.trade_id, plan, d) for leg in legs)
             continue
         cid = str(o.get("client_order_id") or "")
         trade_id = cid if cid.startswith("dc-") else None
@@ -90,8 +101,7 @@ def blotter_rows(orders: list[dict], plans: dict[str, dict]) -> list[BlotterRow]
             continue
         g = [_row(o, "ENTRY", None, trade_id, plan, d)]
         for leg in legs:
-            role = "STOP" if leg.get("type") in ("stop", "stop_limit") else "TARGET"
-            g.append(_row(leg, role, g[0].order_id, trade_id, plan, d))
+            g.append(_row(leg, _role(leg), g[0].order_id, trade_id, plan, d))
         groups.append(g)
         last_entry[g[0].symbol] = g
     return [r for g in groups for r in g]
@@ -108,10 +118,28 @@ def blotter_summary(rows: list[BlotterRow]) -> dict:
     }
 
 
-class Reconciler:
-    """Broker positions vs the bot's view; a mismatch counts once it has lasted grace_s."""
+MAX_FEED_AGE_S = 25.0         # broker positions older than this are not compared
+MAX_SNAPSHOT_AGE_S = 30.0     # nor is a bot view older than this (it writes every 2 s)
 
-    def __init__(self, grace_s: float = 30.0) -> None:
+
+def bot_held_symbols(snap: dict) -> set[str]:
+    """Symbols the bot holds. A pending entry isn't a position yet: if it never fills
+    the bot cancels it after 30 s, which must not look like a mismatch."""
+    return {t["symbol"] for t in snap.get("trades") or [] if t.get("state") != "pending"}
+
+
+def should_reconcile(feed, snapshot_age: float | None, now: float) -> bool:
+    """Compare only fresh broker data with a fresh bot view."""
+    return (feed is not None and feed.ok and feed.last_ok_ts is not None
+            and now - feed.last_ok_ts <= MAX_FEED_AGE_S
+            and snapshot_age is not None and snapshot_age <= MAX_SNAPSHOT_AGE_S)
+
+
+class Reconciler:
+    """Broker positions vs the bot's view; a mismatch counts once it has lasted grace_s
+    (longer than the 30 s entry timeout + a 10 s poll + the bot's write lag)."""
+
+    def __init__(self, grace_s: float = 60.0) -> None:
         self.grace_s = grace_s
         self._since: dict[tuple[str, str], float] = {}
 
