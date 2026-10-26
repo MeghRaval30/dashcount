@@ -280,6 +280,16 @@ ICONS = {
         "...kk..w",
         "....k...",
     ], {"k": "#0b0b0d", "w": "#f2f2f2"}),
+    "heart": ([
+        ".kk...kk.",
+        "krrk.krrk",
+        "krwrkrrrk",
+        "krrrrrrrk",
+        ".krrrrrk.",
+        "..krrrk..",
+        "...krk...",
+        "....k....",
+    ], {"k": "#0b0b0d", "r": "#c4302b", "w": "#f2f2f2"}),
 }
 
 

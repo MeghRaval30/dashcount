@@ -346,3 +346,55 @@ def test_guardian_and_rejections(tmp_path):
     assert [(x.id, x.text) for x in first] == [("order_rejected", "Order rejected: EEE BUY 10")]
     assert eng.evaluate(NOW + 1, _inputs(rejected=[rej])) == []
     assert [x.id for x in eng.evaluate(NOW, _inputs(alpaca_errors_10min=3, alpaca_ok=False))] == ["alpaca_errors"]
+
+
+# ------------------------------------------------------------------ the DESK screen
+def _desk_view(**kw):
+    from dashcount_ui.alerts import Alert
+    from dashcount_ui.broker_feed import FeedState
+    from dashcount_ui.desk import DeskView
+    from dashcount_ui.reconcile import blotter_rows, blotter_summary
+    from dashcount_ui.risk import risk_meters
+
+    legs = [_order("tp", "x1", "AAA", "sell", "limit", 10, 10, 102.03, "filled", "2026-10-26T14:40:00Z", limit=102.0),
+            _order("sl", "x2", "AAA", "sell", "stop", 10, 0, None, "canceled", "2026-10-26T14:31:00Z", stop=99.0)]
+    rows = blotter_rows([_order("e1", "dc-1-1", "AAA", "buy", "limit", 10, 10, 100.05, "filled",
+                                "2026-10-26T14:30:00Z", limit=100.1, legs=legs)],
+                        {"dc-1-1": {"entry": 100.0, "stop": 99.0, "target": 102.0, "qty": 10, "direction": 1}})
+    base = dict(meters=risk_meters(SNAP, GUARDIAN, _limits(), 5.0), stale_text="", rows=rows,
+                summary=blotter_summary(rows), feed=FeedState(True, True, [], [], NOW, 300.0, 0, ""),
+                banner=["AAA: held at the broker but unknown to the bot"], health=list(_rows().values()),
+                alerts=[Alert(NOW, "day_loss_50", "warn", "Day loss at 50% of the limit ($400 of $800)", "day_loss_50"),
+                        Alert(NOW - 60, "trade_open", "info", "AAA LONG opened: 10 sh at 100.00", "trade_open:dc-1-1")])
+    base.update(kw)
+    return DeskView(**base)
+
+
+def test_desk_screen_renders_every_state(tmp_path):
+    from PySide6.QtWidgets import QApplication
+
+    from dashcount_ui import pixel as px
+    from dashcount_ui.desk import DeskScreen
+
+    app = QApplication.instance() or QApplication([])
+    px.load_fonts()
+    assert not px.icon_pixmap("heart", 2).isNull()
+    d = DeskScreen()
+    d.resize(1400, 760)
+    v = _desk_view()
+    assert len(v.meters) == 5 and len(v.rows) == 3 and len(v.health) == 7
+    d.show_view(v)
+    d.show()
+    app.processEvents()
+    img = d.grab()
+    img.save(str(tmp_path / "desk.png"))
+    assert d.panel_errors() == [] and img.width() >= 1000
+    d.show_view(_desk_view(feed=None, rows=[], banner=[], stale_text="bot last seen 3 days ago"))
+    app.processEvents()
+    d.grab()
+    assert d.panel_errors() == []
+    d.show_view(_desk_view(meters=[object()]))                   # one broken panel, the rest keep working
+    app.processEvents()
+    d.grab()
+    assert d.panel_errors() == ["RISK METERS"]
+    d.close()
