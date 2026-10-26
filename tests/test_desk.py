@@ -268,3 +268,81 @@ def test_ollama_rows_and_check():
 
     bad = httpx.Client(transport=httpx.MockTransport(down))
     assert OllamaCheck("http://127.0.0.1:11434", "m", client=bad).check() == (False, False)
+
+
+# ------------------------------------------------------------------ alerts
+DAY = "2026-10-26"
+
+
+def _meter(key, frac, level=None):
+    from dashcount_ui.risk import Meter, level_for
+
+    return Meter(key, key.upper(), frac * 100, 100.0, frac, level or level_for(frac), f"${frac * 100:.0f} of $100")
+
+
+def _inputs(**kw):
+    from dashcount_ui.alerts import AlertInputs
+
+    base = dict(in_session=True, meters=[_meter("day_loss", 0.1), _meter("fuse", 0.1)], losers_in_row=0,
+                streak_limit=4, heartbeat_age=5.0, held_stale=[], rejected=[], alpaca_errors_10min=0,
+                alpaca_ok=True, mismatches=[], ollama_up=True, guardian={"armed": True}, day=DAY)
+    base.update(kw)
+    return AlertInputs(**base)
+
+
+def test_condition_fires_once_and_rearms(tmp_path):
+    from dashcount_ui.alerts import AlertEngine
+
+    eng = AlertEngine(tmp_path)
+    eng.start_day(DAY)
+
+    def ids(frac):
+        return [a.id for a in eng.evaluate(NOW, _inputs(meters=[_meter("day_loss", frac), _meter("fuse", 0.1)]))]
+
+    assert ids(0.6) == ["day_loss_50"] and ids(0.6) == []
+    assert ids(0.4) == [] and ids(0.6) == ["day_loss_50"]
+    assert ids(0.8) == ["day_loss_75"]
+    a = eng.evaluate(NOW, _inputs(losers_in_row=3))
+    assert [x.text for x in a if x.id == "streak_3"] == ["3 losing trades in a row: one more halts the day"]
+
+
+def test_no_session_alerts_outside_market_hours(tmp_path):
+    from dashcount_ui.alerts import AlertEngine
+
+    eng = AlertEngine(tmp_path)
+    eng.start_day(DAY)
+    stale = [_meter("day_loss", 0.9, "stale"), _meter("fuse", 0.9, "stale")]
+    assert eng.evaluate(NOW, _inputs(in_session=False, heartbeat_age=9999.0, ollama_up=False, meters=stale)) == []
+    assert [a.id for a in eng.evaluate(NOW, _inputs(heartbeat_age=61.0))] == ["bot_silent"]
+
+
+def test_journal_events_and_restart(tmp_path):
+    from dashcount_ui.alerts import AlertEngine
+
+    ev = [{"kind": "taken", "ts": NOW, "trade_id": "dc-1-1", "symbol": "AAA", "direction": 1, "qty": 10,
+           "entry": 12.5}, {"kind": "exit", "ts": NOW + 60, "symbol": "AAA", "pnl": 25.0, "r": 0.5},
+          {"kind": "setup", "ts": NOW, "symbol": "BBB"}]
+    eng = AlertEngine(tmp_path)
+    eng.start_day(DAY)
+    got = eng.from_journal(ev, NOW + 61)
+    assert [(a.id, a.level, a.text) for a in got] == [
+        ("trade_open", "info", "AAA LONG opened: 10 sh at 12.50"),
+        ("trade_close", "info", "AAA closed: +25.00 (+0.50R)")]
+    again = AlertEngine(tmp_path)
+    assert [a.id for a in again.start_day(DAY)] == ["trade_close", "trade_open"]      # newest first
+    assert again.from_journal(ev, NOW + 120) == []
+
+
+def test_guardian_and_rejections(tmp_path):
+    from dashcount_ui.alerts import AlertEngine
+    from dashcount_ui.reconcile import BlotterRow
+
+    eng = AlertEngine(tmp_path)
+    eng.start_day(DAY)
+    a = eng.evaluate(NOW, _inputs(guardian={"armed": True, "halted_day": DAY, "halt_reason": "4 losers"}))
+    assert [x.text for x in a] == ["Guardian: halted for the day (4 losers)"] and a[0].level == "danger"
+    rej = BlotterRow("r1", None, NOW, "EEE", "BUY", "ENTRY", 10.0, 0.0, 5.0, "rejected", None, None, None, None)
+    first = eng.evaluate(NOW, _inputs(rejected=[rej]))
+    assert [(x.id, x.text) for x in first] == [("order_rejected", "Order rejected: EEE BUY 10")]
+    assert eng.evaluate(NOW + 1, _inputs(rejected=[rej])) == []
+    assert [x.id for x in eng.evaluate(NOW, _inputs(alpaca_errors_10min=3, alpaca_ok=False))] == ["alpaca_errors"]
