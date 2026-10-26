@@ -39,20 +39,34 @@ def _read_json(path: Path):
         return None
 
 
+def _ago(secs: float) -> str:
+    if secs < 90 * 60:
+        return f"{int(secs // 60)} min"
+    if secs < 48 * 3600:
+        return f"{int(secs // 3600)} h"
+    return f"{int(secs // 86400)} days"
+
+
 class DataSource:
+    FRESH_S = 60                          # re-fetch an unfinished session's history this often
+
     def __init__(self, root: Path | None = None, data: Path | None = None) -> None:
         self.root = root or project_root()
         self.data = data or data_root(self.root)
         self.state = self.data / "state"
+        self.clock = time.time
         self._snap = None
         self._snap_mtime = 0.0
         self._bars = None
         self._bars_mtime = 0.0
         self._fallback: dict = {}          # (day, symbols) -> bars dict fetched from Alpaca
         self._fetching: set = set()
+        self._retry_at: dict = {}          # (day, symbols) -> when a failed fetch may be retried
         self.chart_source = "none"
         self._jfile: Path | None = None
         self._joff = 0
+        self._practice_key = None
+        self._practice = None
 
     # ---------------------------------------------------------- live state
     def snapshot(self) -> dict | None:
@@ -93,22 +107,37 @@ class DataSource:
         if not day or not syms:
             return None
         key = (day, tuple(syms))
-        if key in self._fallback:
-            self.chart_source = "alpaca"
-            return self._fallback[key]
         cache = self.state / f"bars-{day}.json"
-        cached = _read_json(cache)
-        if cached and set(syms) <= set(cached.get("symbols", {})):
-            self._fallback[key] = cached
+        now = self.clock()
+        data = self._fallback.get(key)
+        if data is None:
+            cached = _read_json(cache)
+            if cached and set(syms) <= set(cached.get("symbols", {})):
+                data = self._fallback[key] = cached
+        if data is not None:
+            # the free plan serves SIP history up to 15 minutes ago: until then the day is unfinished
+            if not self._complete(data) and now - float(data.get("ts", 0)) >= self.FRESH_S:
+                self._start_fetch(key, day, syms, snap, cache)        # keep showing these meanwhile
             self.chart_source = "alpaca"
-            return cached
-        if key not in self._fetching:
-            self._fetching.add(key)
-            prev = {s["symbol"]: (s["price"] / (1 + s["change_pct"] / 100))
-                    for s in snap.get("symbols") or [] if s.get("price") and s.get("change_pct") is not None}
-            threading.Thread(target=self._fetch, args=(key, day, syms, prev, cache), daemon=True).start()
-        self.chart_source = "loading"
+            return data
+        if now >= self._retry_at.get(key, 0.0):
+            self._start_fetch(key, day, syms, snap, cache)
+            self.chart_source = "loading"
+        else:
+            self.chart_source = "none"
         return None
+
+    @staticmethod
+    def _complete(data: dict) -> bool:
+        return float(data.get("ts", 0)) >= float(data.get("close") or 0) + 16 * 60
+
+    def _start_fetch(self, key, day: str, syms: list[str], snap: dict, cache: Path) -> None:
+        if key in self._fetching:
+            return
+        self._fetching.add(key)
+        prev = {s["symbol"]: (s["price"] / (1 + s["change_pct"] / 100))
+                for s in snap.get("symbols") or [] if s.get("price") and s.get("change_pct") is not None}
+        threading.Thread(target=self._fetch, args=(key, day, syms, prev, cache), daemon=True).start()
 
     def _fetch(self, key, day: str, syms: list[str], prev: dict, cache: Path) -> None:
         try:
@@ -132,15 +161,15 @@ class DataSource:
                     v += r.volume
                     vw.append(round(pv / v, 4) if v else float(r.close))
                 out[sym] = {"prev_close": prev.get(sym), "bars": rows, "vwap": vw}
-            data = {"ts": time.time(), "day": day, "open": s.open, "close": s.close, "symbols": out, "source": "alpaca"}
+            data = {"ts": self.clock(), "day": day, "open": s.open, "close": s.close, "symbols": out, "source": "alpaca"}
             self._fallback[key] = data
             try:
                 cache.write_text(json.dumps(data), encoding="utf-8")
             except OSError:
                 pass
-        except Exception as e:                      # no keys / offline: charts just stay empty
+        except Exception as e:                      # no keys / offline: charts stay empty, retried later
             log.warning("chart bars unavailable: %s", e)
-            self._fallback[key] = None
+            self._retry_at[key] = self.clock() + self.FRESH_S
         finally:
             self._fetching.discard(key)
 
@@ -167,9 +196,9 @@ class DataSource:
             return "LIVE", "trading"
         if age < 90 and st.startswith("waiting"):
             return "WAITING", st.split(":", 1)[-1]
-        if st == "done":
+        if st == "done" and age < 12 * 3600:
             return "IDLE", "day finished"
-        return "IDLE", f"last seen {int(age // 60)} min ago"
+        return "IDLE", f"last seen {_ago(age)} ago"
 
     # ------------------------------------------------------------- journal
     def _journal_file(self) -> Path | None:
@@ -189,14 +218,16 @@ class DataSource:
         if f != self._jfile:
             self._jfile, self._joff = f, 0
         try:
-            with f.open("r", encoding="utf-8") as fh:
+            with f.open("rb") as fh:
                 fh.seek(self._joff)
                 chunk = fh.read()
-                self._joff = fh.tell()
         except OSError:
             return []
+        # the bot may be half-way through writing the last line: leave it for next time
+        end = chunk.rfind(b"\n") + 1
+        self._joff += end
         out = []
-        for line in chunk.splitlines():
+        for line in chunk[:end].decode("utf-8", errors="replace").splitlines():
             try:
                 out.append(json.loads(line))
             except Exception:
@@ -228,15 +259,27 @@ class DataSource:
                       key=lambda p: p.stat().st_mtime) if (self.data / "records").exists() else []
         real = [r for r in runs if "synthetic" not in r.name]
         if real or runs:
-            try:
-                from dashcount.scoreboard import summarize
+            run = (real or runs)[-1]
+            # summarising a long run reads every table: only redo it when the run changes
+            key = (run, max([p.stat().st_mtime for p in run.iterdir()] + [run.stat().st_mtime]))
+            if key != self._practice_key:
+                try:
+                    from dashcount import scoreboard
 
-                s = summarize((real or runs)[-1])
-                out["practice"] = {k: s.get(k) for k in ("run", "days", "trades", "win_rate", "avg_r", "pnl",
-                                                          "pnl_realistic", "end_equity", "start_equity")}
-            except Exception as e:
-                out["practice"] = {"run": (real or runs)[-1].name, "error": str(e)}
+                    s = scoreboard.summarize(run)
+                    self._practice = {k: s.get(k) for k in ("run", "days", "trades", "win_rate", "avg_r", "pnl",
+                                                            "pnl_realistic", "end_equity", "start_equity")}
+                except Exception as e:
+                    self._practice = {"run": run.name, "error": str(e)}
+                self._practice_key = key
+            out["practice"] = self._practice
         return out
+
+    def practice_range(self, n: int = 15) -> tuple[str, str] | None:
+        """The last n downloaded trading days (IEX ticks), for the PRACTICE dialog."""
+        d = self.data / "store" / "ticks" / "feed=iex"
+        days = sorted(p.name for p in d.iterdir() if p.is_dir()) if d.exists() else []
+        return (days[-n] if len(days) >= n else days[0], days[-1]) if days else None
 
     def latest_report(self) -> Path | None:
         rep = sorted((self.root / "reports").glob("*.html"), key=lambda p: p.stat().st_mtime)

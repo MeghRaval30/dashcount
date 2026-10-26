@@ -134,3 +134,160 @@ def test_chart_falls_back_to_alpaca_history(tmp_path, monkeypatch):
     aaa = b["symbols"]["AAA"]
     assert len(aaa["bars"]) == 2 and abs(aaa["prev_close"] - 100.0) < 1e-6 and len(aaa["vwap"]) == 2
     assert (st / "bars-2026-10-22.json").exists()
+
+
+def _wait(cond, tries=60):
+    for _ in range(tries):
+        if cond():
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def test_unfinished_session_history_refreshes_and_failures_retry(tmp_path, monkeypatch):
+    """Today's history is only complete after the close: keep re-fetching it, and
+    never give up for the day after one failed fetch."""
+    import datetime as dt
+
+    import pandas as pd
+
+    import dashcount.data.alpaca_data as ad
+    from dashcount.timeutil import calendar
+    from dashcount_ui.datasource import DataSource
+
+    s = calendar().session(dt.date(2026, 10, 22))
+    clock = {"t": s.open + 3600}                                   # an hour into the session
+    calls = []
+
+    class FakeAD:
+        def __init__(self, *a, **k):
+            pass
+
+        def minutes(self, syms, start, end, feed):
+            calls.append(clock["t"])
+            if len(calls) == 1:
+                raise RuntimeError("network down")
+            n = len(calls)
+            return pd.DataFrame({"symbol": ["AAA"] * n, "ts": [start + 60 * i for i in range(n)],
+                                 "open": [100.0] * n, "high": [101.0] * n, "low": [99.0] * n,
+                                 "close": [100.5] * n, "volume": [1000.0] * n})
+
+    monkeypatch.setattr(ad, "AlpacaData", FakeAD)
+    st = tmp_path / "state"
+    st.mkdir()
+    (st / "live_snapshot.json").write_text(json.dumps({
+        "day": "2026-10-22", "symbols": [{"symbol": "AAA", "price": 100.5, "change_pct": 0.5}]}))
+    ds = DataSource(data=tmp_path)
+    ds.clock = lambda: clock["t"]
+    assert ds.bars() is None
+    assert _wait(lambda: len(calls) == 1 and not ds._fetching)
+    assert ds.bars() is None and len(calls) == 1                  # failed: waits before retrying
+    clock["t"] += 61
+    ds.bars()
+    assert _wait(lambda: ds.bars() is not None)                   # retried and succeeded
+    assert len(ds.bars()["symbols"]["AAA"]["bars"]) == 2
+    clock["t"] += 30
+    ds.bars()
+    assert len(calls) == 2                                        # still fresh: no new request
+    clock["t"] += 31
+    old = ds.bars()                                               # stale: refresh, keep showing the old bars
+    assert old is not None
+    assert _wait(lambda: len(calls) == 3 and not ds._fetching)
+    assert len(ds.bars()["symbols"]["AAA"]["bars"]) == 3
+
+
+def test_journal_never_loses_a_half_written_line(tmp_path):
+    from dashcount_ui.datasource import DataSource
+
+    st = tmp_path / "state"
+    st.mkdir()
+    j = st / "journal-2026-10-26.jsonl"
+    j.write_bytes(b'{"ts": 1, "kind": "setup", "text": "a"}\n{"ts": 2, "kind": "ta')      # bot mid-write
+    ds = DataSource(data=tmp_path)
+    assert [e["text"] for e in ds.journal_new()] == ["a"]
+    with j.open("ab") as fh:
+        fh.write(b'ken", "text": "b"}\n')
+    assert [e["text"] for e in ds.journal_new()] == ["b"]
+
+
+def test_bot_commands_never_relaunch_the_dashboard(tmp_path, monkeypatch):
+    import shutil
+    import sys
+
+    from dashcount_ui.app import bot_command
+
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", str(tmp_path / "DashCount.exe"))
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    py = tmp_path / ".venv" / "Scripts" / "python.exe"
+    py.parent.mkdir(parents=True)
+    py.write_text("")
+    assert bot_command(tmp_path, "panic") == [str(py), "-m", "dashcount.cli", "panic"]
+    py.unlink()
+    monkeypatch.setattr(shutil, "which", lambda name: "C:/tools/uv.exe" if name == "uv" else None)
+    assert bot_command(tmp_path, "panic") == ["C:/tools/uv.exe", "run", "--no-sync", "dashcount", "panic"]
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    with pytest.raises(RuntimeError):                             # never run DashCount.exe as the bot
+        bot_command(tmp_path, "panic")
+
+
+def test_new_day_starts_a_fresh_map_and_journal(tmp_path):
+    from PySide6.QtWidgets import QApplication
+
+    from dashcount_ui import pixel as px
+    from dashcount_ui.app import MainWindow
+    from dashcount_ui.datasource import DataSource
+
+    app = QApplication.instance() or QApplication([])
+    px.load_fonts()
+    st = tmp_path / "state"
+    st.mkdir()
+
+    def day(d, ts, eq):
+        (st / "live_snapshot.json").write_text(json.dumps({
+            "day": d, "ts": ts, "budget": {"equity": eq, "start_equity": 10000.0, "pnl": eq - 10000.0}}))
+        (st / f"journal-{d}.jsonl").write_text(json.dumps({"ts": ts, "kind": "setup", "text": d}) + "\n")
+        os.utime(st / "live_snapshot.json", (ts, ts))
+
+    day("2026-10-23", 1000.0, 10100.0)
+    w = MainWindow(DataSource(data=tmp_path))
+    w.refresh()
+    assert w.intraday and w.journal.entries
+    day("2026-10-26", 2000.0, 10050.0)
+    w.refresh()
+    assert [eq for _, eq in w.intraday] == [10050.0]
+    assert [e["text"] for e in w.journal.entries] == ["2026-10-26"]
+    w.close()
+    app.processEvents()
+
+
+def test_practice_summary_is_cached_until_the_run_changes(tmp_path, monkeypatch):
+    import dashcount.scoreboard as sb
+    from dashcount_ui.datasource import DataSource
+
+    run = tmp_path / "records" / "practice-x-20261026-120000"
+    (run / "daily").mkdir(parents=True)
+    calls = []
+    monkeypatch.setattr(sb, "summarize", lambda p: calls.append(p) or {"run": p.name, "days": 1})
+    ds = DataSource(data=tmp_path)
+    assert ds.history()["practice"]["run"] == run.name
+    ds.history()
+    assert len(calls) == 1
+    (run / "trades").mkdir()
+    t = time.time() + 5
+    os.utime(run / "trades", (t, t))
+    ds.history()
+    assert len(calls) == 2
+
+
+def test_last_seen_reads_naturally_and_practice_defaults_follow_the_data(tmp_path):
+    from dashcount_ui.datasource import DataSource
+
+    st = tmp_path / "state"
+    st.mkdir()
+    (st / "heartbeat.json").write_text(json.dumps({"ts": time.time() - 3 * 86400, "status": "done:x"}))
+    ds = DataSource(data=tmp_path)
+    assert ds.bot_state() == ("IDLE", "last seen 3 days ago")
+    for d in ("2026-06-01", "2026-06-02", "2026-10-15", "2026-10-16"):
+        (tmp_path / "store" / "ticks" / "feed=iex" / d).mkdir(parents=True)
+    assert ds.practice_range(3) == ("2026-06-02", "2026-10-16")

@@ -43,6 +43,21 @@ QScrollBar::handle:vertical { background: #7d7d7d; min-height: 24px; }
 """
 
 
+def bot_command(root: Path, *args: str) -> list[str]:
+    """How to run a `dashcount` command for this project: its own virtualenv first, then uv.
+    Never sys.executable when packaged: that is DashCount.exe, so PANIC would just open
+    another dashboard instead of closing positions."""
+    for py in (root / ".venv" / "Scripts" / "python.exe", root / ".venv" / "bin" / "python"):
+        if py.exists():
+            return [str(py), "-m", "dashcount.cli", *args]
+    uv = shutil.which("uv")
+    if uv:
+        return [uv, "run", "--no-sync", "dashcount", *args]
+    if not getattr(sys, "frozen", False):
+        return [sys.executable, "-m", "dashcount.cli", *args]
+    raise RuntimeError(f"can't find the bot: no .venv in {root} and uv is not on PATH")
+
+
 class Signals(QObject):
     toast = Signal(str)
 
@@ -57,13 +72,14 @@ class Stone(QWidget):
 
 
 class PracticeDialog(QDialog):
-    def __init__(self, parent=None) -> None:
+    def __init__(self, parent=None, days: tuple[str, str] | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Run a practice")
         form = QFormLayout(self)
         form.addRow(QLabel("Replay history through the bot (needs `dashcount download` first)."))
-        self.start = QDateEdit(QDate(2026, 9, 28))
-        self.end = QDateEdit(QDate(2026, 10, 16))
+        first, last = days or ("2026-09-28", "2026-10-16")           # default: the latest downloaded days
+        self.start = QDateEdit(QDate.fromString(first, "yyyy-MM-dd"))
+        self.end = QDateEdit(QDate.fromString(last, "yyyy-MM-dd"))
         for d in (self.start, self.end):
             d.setCalendarPopup(True)
             d.setDisplayFormat("yyyy-MM-dd")
@@ -91,6 +107,7 @@ class MainWindow(QWidget):
         self.practice_proc: subprocess.Popen | None = None
         self.history: dict = {}
         self.intraday: list[tuple[float, float]] = []
+        self.day: str | None = None
         self.show_all_days = False
         self._toast_until = 0.0
 
@@ -196,6 +213,12 @@ class MainWindow(QWidget):
             state, detail = "LIVE", "demo data"
         g = self.ds.guardian()
         today = snap.get("day") or dt.datetime.now(ET).date().isoformat()
+        if snap.get("day") and snap["day"] != self.day:
+            if self.day is not None:                # left open overnight: today's map and journal start fresh
+                self.intraday = []
+                self.journal.entries = []
+                self.journal.render()
+            self.day = snap["day"]
 
         new = self.ds.journal_new()
         if new:
@@ -335,7 +358,7 @@ class MainWindow(QWidget):
         pr = self.history.get("practice")
         lines.append(("#LATEST PRACTICE", "", "text"))
         if pr and not pr.get("error"):
-            lines.append((pr["run"][9:34], "", "muted"))
+            lines.append((pr["run"].removeprefix("practice-")[:30], "", "muted"))
             if pr.get("trades"):
                 lines.append((f"{pr.get('days')} days, {pr['trades']} trades", f"{pr.get('win_rate') or 0:.0%} won", "text"))
                 pv = pr.get("pnl_realistic") or 0.0
@@ -390,20 +413,21 @@ class MainWindow(QWidget):
             self.toast(" | ".join(self.ds.bot_state()))
 
     def _cmd(self, *args: str) -> list[str]:
-        uv = shutil.which("uv")
-        if uv:
-            return [uv, "run", "--no-sync", "dashcount", *args]
-        return [sys.executable, "-m", "dashcount.cli", *args]
+        return bot_command(self.ds.root, *args)
 
-    def _spawn(self, args: list[str], log_name: str) -> subprocess.Popen:
+    def _spawn(self, args: list[str], log_name: str) -> subprocess.Popen | None:
+        try:
+            cmd = self._cmd(*args)
+        except RuntimeError as e:
+            self.toast(f"Can't start it: {e}")
+            return None
         logs = self.ds.root / "logs"
         logs.mkdir(exist_ok=True)
-        out = open(logs / log_name, "a", encoding="utf-8")
         flags = 0
         if os.name == "nt":
             flags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
-        return subprocess.Popen(self._cmd(*args), cwd=self.ds.root, stdout=out, stderr=subprocess.STDOUT,
-                                creationflags=flags)
+        with open(logs / log_name, "a", encoding="utf-8") as out:      # the child keeps its own handle
+            return subprocess.Popen(cmd, cwd=self.ds.root, stdout=out, stderr=subprocess.STDOUT, creationflags=flags)
 
     def _confirm(self, title: str, text: str) -> bool:
         box = QMessageBox(self)
@@ -419,10 +443,14 @@ class MainWindow(QWidget):
             try:
                 r = subprocess.run(self._cmd(*args), cwd=self.ds.root, capture_output=True, text=True, timeout=120,
                                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-                tail = (r.stdout or r.stderr or "").strip().splitlines()
-                self.sig.toast.emit(tail[-1] if tail else done_msg)
+                tail = ((r.stdout or "") + (r.stderr or "")).strip().splitlines()
+                if r.returncode != 0:
+                    self.sig.toast.emit(f"{args[0].upper()} FAILED (exit {r.returncode}): {tail[-1] if tail else ''}"
+                                        f" - run `dashcount {' '.join(args)}` in a terminal")
+                else:
+                    self.sig.toast.emit(tail[-1] if tail else done_msg)
             except Exception as e:
-                self.sig.toast.emit(f"Failed: {e}")
+                self.sig.toast.emit(f"{args[0].upper()} FAILED: {e} - run `dashcount {' '.join(args)}` in a terminal")
         threading.Thread(target=work, daemon=True).start()
 
     def start_day(self) -> None:
@@ -431,8 +459,8 @@ class MainWindow(QWidget):
         state, _ = self.ds.bot_state()
         if state in ("LIVE", "WAITING"):
             return self.toast("The bot is already running.")
-        self._spawn(["run-day"], "run-day-console.log")
-        self.toast("Starting: Guardian + bot. It builds the level map at 09:20 New York time.")
+        if self._spawn(["run-day"], "run-day-console.log"):
+            self.toast("Starting: Guardian + bot. It builds the level map at 09:20 New York time.")
 
     def stop_day(self) -> None:
         if self.demo:
@@ -461,13 +489,14 @@ class MainWindow(QWidget):
     def practice(self) -> None:
         if self.practice_proc is not None and self.practice_proc.poll() is None:
             return self.toast("A practice run is already going.")
-        d = PracticeDialog(self)
+        d = PracticeDialog(self, self.ds.practice_range())
         if d.exec() != QDialog.DialogCode.Accepted:
             return
         s, e = d.start.date().toString("yyyy-MM-dd"), d.end.date().toString("yyyy-MM-dd")
         self.practice_proc = self._spawn(["practice", "--start", s, "--end", e, "--vetoes", d.vetoes.currentText()],
                                          "practice-console.log")
-        self.toast(f"Practice {s} to {e} started (vetoes: {d.vetoes.currentText()}).")
+        if self.practice_proc:
+            self.toast(f"Practice {s} to {e} started (vetoes: {d.vetoes.currentText()}).")
 
     def open_report(self) -> None:
         rep = self.ds.latest_report()
