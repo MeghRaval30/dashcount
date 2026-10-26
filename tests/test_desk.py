@@ -198,3 +198,73 @@ def test_demo_feed_has_orders():
     st = DemoFeed({"trades": [{"symbol": "AAA", "qty": 10, "direction": 1}]}, journal).state()
     assert st.configured and st.ok and st.orders and st.orders[0]["client_order_id"] == "dc-1-1"
     assert st.positions == [{"symbol": "AAA", "qty": "10"}]
+
+
+# ------------------------------------------------------------------ health
+def _rows(**kw):
+    from dashcount_ui.broker_feed import FeedState
+    from dashcount_ui.health import health_rows
+
+    base = dict(in_session=True, heartbeat_age=5.0, guardian_age=5.0, snap={}, held=set(),
+                feed=FeedState(True, True, [], [], NOW, 300.0, 0, ""), ollama=(True, True),
+                timeouts={"kronos": 10.0, "finr1": 20.0}, now=NOW)
+    base.update(kw)
+    return {r.key: r for r in health_rows(**base)}
+
+
+def test_bot_and_guardian_levels():
+    assert [_rows(heartbeat_age=a)["bot"].level for a in (5.0, 45.0, 120.0)] == ["ok", "warn", "danger"]
+    assert [_rows(guardian_age=a)["guardian"].level for a in (5.0, 45.0, 70.0)] == ["ok", "warn", "danger"]
+    assert _rows(heartbeat_age=120.0, in_session=False)["bot"].level == "idle"
+    assert _rows(heartbeat_age=5.0)["bot"].text == "5 s ago"
+
+
+def test_market_data_levels():
+    snap = {"symbols": [{"symbol": "A", "last_trade_age": 10.0}, {"symbol": "B", "last_trade_age": 200.0},
+                        {"symbol": "C", "last_trade_age": 300.0}, {"symbol": "SPY", "market": True,
+                                                                     "last_trade_age": 999.0}]}
+    assert _rows(snap=snap)["data"].level == "warn"
+    assert _rows(snap=snap)["data"].text == "2 quiet: C 300 s"
+    assert _rows(snap=snap, held={"B"})["data"].level == "danger"
+    assert _rows(snap={"symbols": [{"symbol": "A", "last_trade_age": 10.0}]})["data"].level == "ok"
+
+
+def test_alpaca_levels():
+    from dashcount_ui.broker_feed import FeedState
+
+    assert _rows()["alpaca"].level == "ok" and _rows()["alpaca"].text == "300 ms"
+    assert _rows(feed=FeedState(True, True, [], [], NOW, 300.0, 1, "x"))["alpaca"].level == "warn"
+    assert _rows(feed=FeedState(True, False, [], [], NOW - 10, 300.0, 3, "HTTP 500"))["alpaca"].level == "danger"
+    assert _rows(feed=FeedState(True, False, [], [], NOW - 90, 300.0, 1, "x"))["alpaca"].level == "danger"
+    none = _rows(feed=None)["alpaca"]
+    assert none.level == "warn" and none.text == "keys not set (.env)"
+
+
+def test_ai_rows():
+    snap = {"veto_health": {"kronos": {"last_s": 9.0, "avg_s": 6.0, "calls": 5, "errors": 0, "timeouts": 0}}}
+    r = _rows(snap=snap)
+    assert r["kronos"].level == "warn" and r["kronos"].label == "KRONOS"
+    assert r["finr1"].level == "idle" and r["finr1"].text == "not reported"
+    snap["veto_health"]["kronos"].update(errors=2, timeouts=1)
+    assert _rows(snap=snap)["kronos"].level == "danger"
+    ok = {"veto_health": {"kronos": {"last_s": 5.1, "avg_s": 5.4, "calls": 12, "errors": 0, "timeouts": 0}}}
+    assert _rows(snap=ok)["kronos"].level == "ok" and _rows(snap=ok)["kronos"].text == "5.1 s (avg 5.4, 12 calls)"
+    assert _rows(snap=ok, in_session=False)["kronos"].level == "idle"
+
+
+def test_ollama_rows_and_check():
+    import httpx
+
+    from dashcount_ui.health import OllamaCheck
+
+    assert _rows(ollama=(True, False))["ollama"].level == "warn"
+    assert _rows(ollama=(False, False))["ollama"].level == "danger"
+    assert _rows(ollama=(False, False), in_session=False)["ollama"].level == "idle"
+    good = httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(200, json={"models": [{"name": "m"}]})))
+    assert OllamaCheck("http://127.0.0.1:11434", "m", client=good).check() == (True, True)
+
+    def down(req):
+        raise httpx.ConnectError("refused")
+
+    bad = httpx.Client(transport=httpx.MockTransport(down))
+    assert OllamaCheck("http://127.0.0.1:11434", "m", client=bad).check() == (False, False)
