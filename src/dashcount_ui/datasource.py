@@ -39,7 +39,7 @@ def _read_json(path: Path):
         return None
 
 
-def _ago(secs: float) -> str:
+def ago(secs: float) -> str:
     if secs < 90 * 60:
         return f"{int(secs // 60)} min"
     if secs < 48 * 3600:
@@ -198,7 +198,7 @@ class DataSource:
             return "WAITING", st.split(":", 1)[-1]
         if st == "done" and age < 12 * 3600:
             return "IDLE", "day finished"
-        return "IDLE", f"last seen {_ago(age)} ago"
+        return "IDLE", f"last seen {ago(age)} ago"
 
     # ------------------------------------------------------------- journal
     def _journal_file(self) -> Path | None:

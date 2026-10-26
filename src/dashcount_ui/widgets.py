@@ -378,8 +378,9 @@ class PriceChart(QWidget):
             y = yp(v)
             for x in range(price_area.left(), price_area.right(), 6):
                 p.fillRect(QRect(x, y, 2, 1), col("#2a2a30"))
-            p.setPen(col("muted"))
-            p.drawText(price_area.right() + 6, y + 5, f"{v:,.2f}")
+            if abs(y - yp(price)) >= 14:                 # the last-price tag sits there
+                p.setPen(col("muted"))
+                p.drawText(price_area.right() + 6, y + 5, f"{v:,.2f}")
         for hh in range(10, 16):
             t = t0 + (hh * 60 - 9 * 60 - 30) * 60
             if t0 < t < t1:

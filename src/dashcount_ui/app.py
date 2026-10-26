@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (QApplication, QComboBox, QDateEdit, QDialog, QDia
                                QHBoxLayout, QLabel, QMessageBox, QScrollArea, QVBoxLayout, QWidget)
 
 from . import pixel as px
-from .datasource import DataSource, project_root
+from .datasource import DataSource, ago, project_root
 from .sound import Sounds
 from .widgets import (Footer, Header, HotbarButton, InventoryView, JournalView, LevelView, ParchmentPanel,
                       PixelPanel, PriceChart, ScoreView, TreasureMap, countdown, money)
@@ -288,7 +288,10 @@ class MainWindow(QWidget):
             left += f"  |  window: {snap['blocked_now'].replace('_', ' ')}"
         if snap.get("guardian_block"):
             left += f"  |  blocked: {snap['guardian_block']}"
-        right = f"snapshot {age:.0f}s old  |  {self.ds.data}" if age is not None else str(self.ds.data)
+        if age is not None:
+            right = f"snapshot {f'{age:.0f}s' if age < 120 else ago(age)} old  |  {self.ds.data}"
+        else:
+            right = str(self.ds.data)
         if now > self._toast_until:
             self.footer.toast = ""
         self.footer.set_text(left, right)
