@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import logging
 import os
 import shutil
 import subprocess
@@ -15,14 +16,24 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from PySide6.QtCore import QDate, QObject, QSettings, Qt, QTimer, Signal
-from PySide6.QtGui import QPainter
-from PySide6.QtWidgets import (QApplication, QComboBox, QDateEdit, QDialog, QDialogButtonBox, QFormLayout,
+from PySide6.QtGui import QKeySequence, QPainter, QShortcut
+from PySide6.QtWidgets import (QApplication, QComboBox, QDateEdit, QDialog, QDialogButtonBox, QFormLayout, QStackedWidget,
                                QHBoxLayout, QLabel, QMessageBox, QScrollArea, QVBoxLayout, QWidget)
 
 from . import pixel as px
+from .alerts import AlertEngine, AlertInputs
+from .broker_feed import DemoFeed, feed_from_env
 from .datasource import DataSource, ago, project_root
+from .desk import DeskScreen, DeskView
+from .health import OllamaCheck, health_rows
+from .reconcile import Reconciler, blotter_rows, blotter_summary, plans_from_journal
+from .risk import Limits, limits_from_config, risk_meters
 from .sound import Sounds
-from .widgets import (Footer, Header, HotbarButton, InventoryView, JournalView, LevelView, ParchmentPanel,
+
+log = logging.getLogger(__name__)
+ALERT_SOUND = {"warn": "taken", "danger": "panic"}      # trades already have their own journal sounds
+SESSION_MARGIN_S = 1800.0
+from .widgets import (Footer, Header, HotbarButton, InventoryView, JournalView, LevelView, ParchmentPanel, ScreenTabs,
                       PixelPanel, PriceChart, ScoreView, TreasureMap, countdown, money)
 
 ET = ZoneInfo("America/New_York")
@@ -124,8 +135,19 @@ class MainWindow(QWidget):
         self.header.chip_clicked.connect(self.on_chip)
         outer.addWidget(self.header)
 
+        self.tabs = ScreenTabs([("table", "TABLE"), ("desk", "DESK")])
+        self.tabs.current_changed.connect(self.show_screen)
+        outer.addWidget(self.tabs)
+        self.stack = QStackedWidget()
+        outer.addWidget(self.stack, 1)
         stone = Stone()
-        outer.addWidget(stone, 1)
+        self.stack.addWidget(stone)
+        self.desk = DeskScreen()
+        self.stack.addWidget(self.desk)
+        self.screens = {"table": stone, "desk": self.desk}
+        for i, key in enumerate(("table", "desk"), start=1):
+            QShortcut(QKeySequence(str(i)), self, activated=lambda k=key: self.show_screen(k))
+        self._init_desk()
         rows = QVBoxLayout(stone)
         rows.setContentsMargins(10, 10, 10, 6)
         rows.setSpacing(10)
@@ -219,6 +241,8 @@ class MainWindow(QWidget):
                 self.journal.entries = []
                 self.journal.render()
             self.day = snap["day"]
+        s0 = snap.get("session") or {}
+        self._session = (float(s0["open"]), float(s0["close"])) if s0.get("open") and s0.get("close") else None
 
         new = self.ds.journal_new()
         if new:
@@ -280,6 +304,10 @@ class MainWindow(QWidget):
         self.update_chart(snap, bars)
         self.update_score(snap)
         self.update_map(snap)
+        try:
+            self._update_desk(snap, new, time.time())
+        except Exception:                       # the DESK must never take the TABLE down with it
+            log.exception("DESK update failed")
 
         ev = snap.get("events") or {}
         age = self.ds.snapshot_age()
@@ -395,6 +423,106 @@ class MainWindow(QWidget):
                 marks.append((t["closed_ts"], run, (t.get("pnl") or 0) > 0))
         pts += [p for p in self.intraday if not pts or p[0] > pts[-1][0]]
         self.map.set_path(sorted(pts), marks, "today")
+
+    # ------------------------------------------------------------------ DESK
+    def _init_desk(self) -> None:
+        try:
+            from dashcount.config import load_config
+
+            cfg = load_config()
+            self.limits = limits_from_config(cfg)
+            self.veto_timeouts = {"kronos": cfg.veto.kronos.timeout_s, "finr1": cfg.veto.finr1.timeout_s}
+            ollama = (cfg.veto.finr1.ollama_url, cfg.veto.finr1.model)
+        except Exception as e:
+            log.warning("settings unavailable for the DESK (%s): using the defaults", e)
+            self.limits = Limits(8.0, 4, 25.0, 6.0, 2.0)
+            self.veto_timeouts = {"kronos": 10.0, "finr1": 20.0}
+            ollama = ("http://127.0.0.1:11434", "")
+        self.alerts = AlertEngine(self.ds.state)
+        self.alert_day: str | None = None
+        self.alert_list: list = []
+        self.reconciler = Reconciler()
+        self.unread = 0
+        self._session: tuple[float, float] | None = None
+        self._stop = threading.Event()
+        if self.demo:
+            self.ollama_state: tuple[bool, bool] | None = (True, True)
+            journal = []
+            for f in sorted(self.ds.state.glob("journal-*.jsonl")):
+                for line in f.read_text(encoding="utf-8").splitlines():
+                    try:
+                        journal.append(json.loads(line))
+                    except ValueError:
+                        continue
+            self.feed = DemoFeed(self.ds.snapshot() or {}, journal)
+        else:
+            self.ollama_state = None
+            checker = OllamaCheck(*ollama)
+
+            def watch_ollama() -> None:
+                while not self._stop.is_set():
+                    self.ollama_state = checker.check()
+                    self._stop.wait(30.0)
+
+            threading.Thread(target=watch_ollama, daemon=True, name="ollama-check").start()
+            self.feed = feed_from_env(self.ds.root, lambda: self._session)
+        if self.feed is not None:
+            self.feed.start()
+
+    def _update_desk(self, snap: dict, new: list[dict], now: float) -> None:
+        day = snap.get("day")
+        if day and day != self.alert_day:
+            self.alert_day = day
+            stored = self.alerts.start_day(day)
+            backlog = self.journal.entries[:len(self.journal.entries) - len(new)]
+            self.alert_list = sorted(self.alerts.from_journal(backlog, now) + stored, key=lambda a: -a.ts)
+        fresh = self.alerts.from_journal(new, now) if self.alert_day else []
+        guardian = self.ds.guardian()
+        age = self.ds.snapshot_age()
+        meters = risk_meters(snap, guardian, self.limits, age)
+        feed = self.feed.state() if self.feed is not None else None
+        rows = blotter_rows(feed.orders, plans_from_journal(self.journal.entries)) if feed else []
+        held = {t["symbol"] for t in snap.get("trades") or []}
+        mismatches = []
+        if feed is not None and feed.ok:
+            broker = {p.get("symbol") for p in feed.positions if float(p.get("qty") or 0) != 0}
+            mismatches = self.reconciler.update(broker, held | self.ds.bot_positions(), now)
+        sess = self._session
+        in_session = bool(sess) and sess[0] - SESSION_MARGIN_S <= now <= sess[1] + SESSION_MARGIN_S
+        quiet = {s["symbol"] for s in snap.get("symbols") or [] if (s.get("last_trade_age") or 0) > 180}
+        hb = self.ds.heartbeat_age()
+        health = health_rows(in_session=in_session, heartbeat_age=hb, guardian_age=self.ds.guardian_age(), snap=snap,
+                             held=held, feed=feed, ollama=self.ollama_state, timeouts=self.veto_timeouts, now=now)
+        if self.alert_day:
+            fresh += self.alerts.evaluate(now, AlertInputs(
+                in_session, meters, int(guardian.get("losers_in_row") or 0), self.limits.losers_in_row, hb,
+                sorted(held & quiet), [r for r in rows if r.status == "rejected"],
+                feed.errors_10min if feed else 0, bool(feed and feed.ok), mismatches,
+                self.ollama_state[0] if self.ollama_state else None, guardian, self.alert_day))
+        if fresh:
+            self.alert_list = sorted(fresh + self.alert_list, key=lambda a: -a.ts)[:200]
+            if self.stack.currentWidget() is not self.desk:
+                self.unread += len(fresh)
+                self.tabs.set_badge("desk", self.unread)
+            worst = max(fresh, key=lambda a: ("info", "warn", "danger").index(a.level)).level
+            if worst in ALERT_SOUND:
+                self.sounds.play(ALERT_SOUND[worst])
+        stale = ("bot has not run here yet" if age is None else f"bot last seen {ago(age)} ago" if age > 90 else "")
+        self.desk.show_view(DeskView(meters, stale, rows, blotter_summary(rows), feed, mismatches, health,
+                                     self.alert_list))
+
+    def show_screen(self, key: str) -> None:
+        self.stack.setCurrentWidget(self.screens[key])
+        self.tabs.set_current(key)
+        if key == "desk":
+            self.unread = 0
+            self.tabs.set_badge("desk", 0)
+
+    def closeEvent(self, e) -> None:
+        self._stop.set()
+        if self.feed is not None:
+            self.feed.stop()
+        super().closeEvent(e)
 
     def toggle_map(self) -> None:
         self.show_all_days = not self.show_all_days
@@ -515,6 +643,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--demo", action="store_true", help="show a synthetic morning (no bot needed)")
     ap.add_argument("--data", help="data folder (default: <project>/data)")
     ap.add_argument("--screenshot", help="render the window to this PNG and exit")
+    ap.add_argument("--screen", choices=["table", "desk"], default="table", help="screen to show first")
     args = ap.parse_args(argv)
 
     root = project_root()
@@ -535,12 +664,14 @@ def main(argv: list[str] | None = None) -> int:
     app.setStyleSheet(STYLE)
     app.setWindowIcon(px.app_icon())
     win = MainWindow(DataSource(root, data), demo=args.demo)
+    win.show_screen(args.screen)
     if args.screenshot:
         win.resize(1440, 900)
         win.show()
         for _ in range(5):
             app.processEvents()
         win.grab().save(args.screenshot)
+        win.close()
         return 0
     win.show()
     return app.exec()

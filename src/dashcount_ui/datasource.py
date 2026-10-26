@@ -179,6 +179,20 @@ class DataSource:
     def heartbeat(self) -> dict | None:
         return _read_json(self.state / "heartbeat.json")
 
+    def heartbeat_age(self) -> float | None:
+        hb = self.heartbeat()
+        return time.time() - float(hb["ts"]) if hb and hb.get("ts") else None
+
+    def guardian_age(self) -> float | None:
+        """The Guardian re-saves its state every few seconds while it runs."""
+        try:
+            return time.time() - (self.state / "guardian.json").stat().st_mtime
+        except OSError:
+            return None
+
+    def bot_positions(self) -> set[str]:
+        return set((_read_json(self.state / "bot_positions.json") or {}).get("symbols") or [])
+
     def guardian(self) -> dict:
         return _read_json(self.state / "guardian.json") or {}
 

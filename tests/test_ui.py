@@ -291,3 +291,61 @@ def test_last_seen_reads_naturally_and_practice_defaults_follow_the_data(tmp_pat
     for d in ("2026-06-01", "2026-06-02", "2026-10-15", "2026-10-16"):
         (tmp_path / "store" / "ticks" / "feed=iex" / d).mkdir(parents=True)
     assert ds.practice_range(3) == ("2026-06-02", "2026-10-16")
+
+
+def _window(data_dir):
+    from PySide6.QtWidgets import QApplication
+
+    from dashcount_ui import pixel as px
+    from dashcount_ui.app import MainWindow
+    from dashcount_ui.datasource import DataSource
+
+    app = QApplication.instance() or QApplication([])
+    px.load_fonts()
+    w = MainWindow(DataSource(data=data_dir), demo=True)
+    w.resize(1440, 900)
+    w.show()
+    app.processEvents()
+    return app, w
+
+
+def test_desk_tab_in_demo(demo_dir):
+    app, w = _window(demo_dir)
+    w.show_screen("desk")
+    app.processEvents()
+    w.desk.grab()
+    assert w.desk.isVisible() and w.desk.panel_errors() == []
+    v = w.desk.view
+    assert len(v.meters) == 5 and len(v.rows) >= 1 and len(v.health) == 7
+    w.show_screen("table")
+    app.processEvents()
+    assert w.level.isVisible() and not w.desk.isVisible()
+    w.close()
+
+
+def test_alert_badge_counts_while_on_table(demo_dir, tmp_path):
+    import shutil
+
+    d = tmp_path / "demo"
+    shutil.copytree(demo_dir, d)
+    for f in (d / "state").glob("alerts-*.jsonl"):
+        f.unlink()
+    app, w = _window(d)
+    assert w.tabs.badges.get("desk", 0) == 0                        # the journal backlog is not news
+    jf = sorted((d / "state").glob("journal-*.jsonl"))[-1]
+    with jf.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps({"ts": time.time(), "kind": "taken", "symbol": "ZZZ", "trade_id": "dc-9-9", "entry": 10.0,
+                             "stop": 9.5, "target": 11.0, "qty": 5, "direction": 1, "text": "x"}) + "\n")
+    w.refresh()
+    assert w.tabs.badges.get("desk") == 1
+    w.show_screen("desk")
+    assert w.tabs.badges.get("desk") == 0
+    w.close()
+
+
+def test_screenshot_desk(tmp_path):
+    from dashcount_ui.app import main
+
+    p = tmp_path / "desk.png"
+    assert main(["--demo", "--screenshot", str(p), "--screen", "desk"]) == 0
+    assert p.exists() and p.stat().st_size > 10_000

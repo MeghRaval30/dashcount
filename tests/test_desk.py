@@ -398,3 +398,12 @@ def test_desk_screen_renders_every_state(tmp_path):
     d.grab()
     assert d.panel_errors() == ["RISK METERS"]
     d.close()
+
+
+def test_blotter_shows_whole_groups_when_cut():
+    from dashcount_ui.desk import visible_rows
+
+    rows = [("e1", False), ("t1", True), ("s1", True), ("e2", False), ("t2", True), ("s2", True)]
+    assert visible_rows(rows, 4, lambda r: r[1]) == [("e2", False), ("t2", True), ("s2", True)]
+    assert visible_rows(rows, 10, lambda r: r[1]) == rows
+    assert visible_rows([("t", True), ("s", True)], 1, lambda r: r[1]) == [("s", True)]   # nothing whole fits

@@ -46,6 +46,14 @@ class DeskView:
     alerts: list[Alert]
 
 
+def visible_rows(rows: list, fit: int, is_leg) -> list:
+    """The newest rows that fit, starting at an entry so no stop or target shows without
+    its order (falls back to the plain tail when not even one whole group fits)."""
+    tail = rows[-fit:] if fit > 0 else []
+    start = next((i for i, r in enumerate(tail) if not is_leg(r)), None)
+    return tail[start:] if start is not None else tail
+
+
 def _hm(ts: float) -> str:
     return dt.datetime.fromtimestamp(ts, tz=ET).strftime("%H:%M") if ts else "--:--"
 
@@ -189,7 +197,8 @@ class BlotterBody(_Body):
         y += 16
         fit = max(1, (h - y) // self.ROW)
         p.setFont(font_vt(18))
-        for ts, sym, side, role, qty, filled, price, status, fill, slip, slip_r, is_leg in d["rows"][-fit:]:
+        for ts, sym, side, role, qty, filled, price, status, fill, slip, slip_r, is_leg in \
+                visible_rows(d["rows"], fit, lambda r: r[-1]):
             ind = 24 if is_leg else 0
             vals = (_hm(ts), sym, side, role, f"{filled:g}/{qty:g}" if role == "ENTRY" else f"{qty:g}",
                     f"{price:,.2f}" if price is not None else "mkt", status.replace("_", " "),

@@ -732,6 +732,59 @@ class HotbarButton(QAbstractButton):
         p.end()
 
 
+class ScreenTabs(QWidget):
+    """Pixel tabs that switch screens (TABLE, DESK, ...); a redstone badge counts unread news."""
+
+    current_changed = Signal(str)
+
+    def __init__(self, tabs: list[tuple[str, str]], parent=None) -> None:
+        super().__init__(parent)
+        self.tabs = tabs                          # (key, label)
+        self.current = tabs[0][0]
+        self.badges: dict[str, int] = {}
+        self._hit: list[tuple[QRect, str]] = []
+        self.setFixedHeight(38)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def set_current(self, key: str) -> None:
+        self.current = key
+        self.update()
+
+    def set_badge(self, key: str, n: int) -> None:
+        self.badges[key] = n
+        self.update()
+
+    def paintEvent(self, e) -> None:
+        p = QPainter(self)
+        p.fillRect(self.rect(), col("deepslate_lo"))
+        p.setFont(font_px(9))
+        fm = p.fontMetrics()
+        x, self._hit = 10, []
+        for i, (key, label) in enumerate(self.tabs):
+            text = f"{i + 1} {label}"
+            r = QRect(x, 4, fm.horizontalAdvance(text) + 34, 30)
+            px.slot(p, r, selected=key == self.current)
+            p.setPen(col("gold") if key == self.current else col("black"))
+            p.drawText(r, Qt.AlignmentFlag.AlignCenter, text)
+            n = self.badges.get(key, 0)
+            if n:
+                b = QRect(r.right() - 14, r.top() - 2, 18, 16)
+                p.fillRect(b, col("black"))
+                p.fillRect(b.adjusted(1, 1, -1, -1), col("redstone"))
+                p.setFont(font_vt(16))
+                p.setPen(col("text"))
+                p.drawText(b, Qt.AlignmentFlag.AlignCenter, str(min(n, 99)))
+                p.setFont(font_px(9))
+            self._hit.append((r, key))
+            x = r.right() + 8
+        p.end()
+
+    def mousePressEvent(self, e) -> None:
+        for rect, key in self._hit:
+            if rect.contains(e.position().toPoint()):
+                self.current_changed.emit(key)
+
+
 class Footer(QWidget):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
