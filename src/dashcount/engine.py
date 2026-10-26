@@ -138,6 +138,7 @@ class Engine:
         self.ghosts: dict[str, list[Ghost]] = {}
         self.attempt_features: dict[str, dict] = {}
         self.pending_veto: set[str] = set()
+        self.veto_health: dict[str, dict] = {}   # per veto source: response times, errors, timeouts
         self.today_r = 0.0
         self.losers_today = 0
         self.counts = {"attempts": 0, "taken": 0}
@@ -390,6 +391,14 @@ class Engine:
         self.pending_veto.discard(c.symbol)
         for r in res.results:
             self.veto_score.add_decision(r.source, r.verdict)
+            h = self.veto_health.setdefault(r.source, {"last_s": 0.0, "avg_s": 0.0, "calls": 0, "errors": 0,
+                                                       "timeouts": 0, "last_ts": 0.0})
+            h["calls"] += 1
+            h["last_s"] = r.latency_s
+            h["avg_s"] += (r.latency_s - h["avg_s"]) / h["calls"]
+            h["last_ts"] = self.now
+            if r.verdict == "unavailable":
+                h["timeouts" if r.reason_code == "timeout" else "errors"] += 1
             self.rec.add("veto_calls", {
                 "attempt_id": c.attempt_id, "ts": self.now, "source": r.source, "verdict": r.verdict,
                 "reason_code": r.reason_code, "confidence": r.confidence, "explanation": r.explanation,
@@ -418,16 +427,18 @@ class Engine:
         if self.executor.busy(c.symbol) or block:
             return self._skip(c, base, "skip_late:" + (block or "busy"), f)
         self.counts["taken"] += 1
-        self._note("taken", c.symbol, f"{c.pad.replace('_', ' ')} {side_name(c.direction).lower()} -> TAKEN "
-                   f"{qty} sh, bet {base.get('risk_pct')}%, stop {c.stop:.2f} target {c.target:.2f}",
-                   tc=round(f.get("tc") or 0.0, 2), action="taken")
         log.info("TAKEN %s %s %s qty %d entry %.2f stop %.2f target %.2f (true count %+.2f, bet %s%%)",
                  c.symbol, c.pad, side_name(c.direction), qty, c.entry, c.stop, c.target, f.get("tc") or 0.0,
                  base.get("risk_pct"))
         base["action"] = "taken"
         self.rec.add("attempts", base)
         self.attempt_features[c.attempt_id] = f
-        self.executor.enter(c, qty, self.now, meta={"attempt": base})
+        t = self.executor.enter(c, qty, self.now, meta={"attempt": base})
+        # the plan travels with the order id, so the dashboard can measure slippage at the broker
+        self._note("taken", c.symbol, f"{c.pad.replace('_', ' ')} {side_name(c.direction).lower()} -> TAKEN "
+                   f"{qty} sh, bet {base.get('risk_pct')}%, stop {c.stop:.2f} target {c.target:.2f}",
+                   tc=round(f.get("tc") or 0.0, 2), action="taken", trade_id=t.trade_id, entry=c.entry,
+                   stop=c.stop, target=c.target, qty=int(qty), direction=c.direction)
 
     def _note(self, kind: str, symbol: str, text: str, **extra) -> None:
         if self.journal is not None:
@@ -631,7 +642,7 @@ class Engine:
             "market": {"z": round(mz, 3), "spy_change": idx_chg("SPY"), "qqq_change": idx_chg("QQQ")},
             "symbols": syms, "trades": trades, "flags": self.plan.flags,
             "blocked_now": self.plan.blocked_reason(now), "guardian_block": self.guardian_block(),
-            "veto_score": self.veto_score.d, **(extra or {}),
+            "veto_score": self.veto_score.d, "veto_health": self.veto_health, **(extra or {}),
         }
 
     def bars_snapshot(self) -> dict:

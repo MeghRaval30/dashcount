@@ -29,12 +29,13 @@ def any_count(monkeypatch):
     monkeypatch.setattr(sz, "bucket", lambda tc: 1)
 
 
-def _run(market, tmp_path, chain=None, guardian=True, **over):
+def _run(market, tmp_path, chain=None, guardian=True, journal=None, **over):
     c = cfg(**over)
     plan, tr, qu = market
     rec = Recorder(tmp_path, "t", "v")
     b = SimBroker(c.simulator)
-    eng = Engine(c, plan, b, chain, rec, feed="sip", guardian=GuardianRules(c.guardian_mode) if guardian else None)
+    eng = Engine(c, plan, b, chain, rec, feed="sip", guardian=GuardianRules(c.guardian_mode) if guardian else None,
+                 journal=journal)
     replay(eng, tr, qu)
     rec.flush("d")
     return eng, b, tmp_path / "t"
@@ -69,6 +70,26 @@ def test_veto_everything_means_no_trades_but_ghosts(market, tmp_path, any_count)
     assert read_table(run, "trades").empty
     vc = read_table(run, "veto_calls")
     assert set(vc["verdict"]) == {"veto"}
+
+
+def test_snapshot_reports_veto_health(market, tmp_path, any_count):
+    c = cfg()
+    chain = VetoChain(c.veto, VetoAll(), None, None)
+    eng, b, run = _run(market, tmp_path, chain=chain, pads={"target_r": 2.0},
+                       gates={"min_true_count": -99.0, "market_against": -99.0},
+                       hazards={"cost_mult": 0.0})
+    vh = eng.snapshot()["veto_health"]["kronos"]
+    assert vh["calls"] > 0 and vh["errors"] == 0 and vh["timeouts"] == 0
+    assert vh["last_s"] == pytest.approx(1.0) and vh["avg_s"] == pytest.approx(1.0)
+
+
+def test_taken_journal_event_carries_the_plan(market, tmp_path, any_count):
+    events = []
+    _run(market, tmp_path, journal=events.append, gates={"min_true_count": -99.0, "market_against": -99.0},
+         hazards={"cost_mult": 0.0})
+    taken = [e for e in events if e["kind"] == "taken"]
+    assert taken and taken[0]["trade_id"].startswith("dc-")
+    assert {"entry", "stop", "target", "qty", "direction"} <= set(taken[0])
 
 
 def test_ghosts_pay_costs_and_veto_score_uses_net_r(market, tmp_path, any_count):
